@@ -1,0 +1,16 @@
+{
+  "name": "bdltradingbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Outils de déploiement du backend Cloudflare de BDLTradingBot",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check:worker": "wrangler deploy --dry-run --outdir .wrangler/check",
+    "test:worker": "node cloudflare/tests/worker.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.2"
+  }
+}

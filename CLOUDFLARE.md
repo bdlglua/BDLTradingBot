@@ -12,6 +12,21 @@ Ce backend fournit le portefeuille, la recherche d'actifs, les devis et les conf
 
 ## 1. Créer le compte et le Worker
 
+### Depuis GitHub — parcours recommandé si le dépôt est déjà connecté
+
+Le dépôt contient `wrangler.jsonc`, qui indique le point d'entrée `cloudflare/worker.mjs`, et une version verrouillée de Wrangler. Pour le Worker nommé **`bdltradingbot`**, utilisez :
+
+- Répertoire racine : `/`.
+- Commande de build : aucune.
+- Commande de déploiement : `npx wrangler deploy`.
+- Branche de production : `main`.
+
+Le nom du Worker dans Cloudflare doit correspondre au champ `name` de `wrangler.jsonc`. S'il est différent, adaptez ce champ au nom réel. Les secrets Bitpanda se règlent dans les paramètres **du Worker**, pas dans les paramètres de build.
+
+Le premier déploiement n'exige aucune liaison D1 et ne crée pas de base automatiquement. Le Worker reste sans accès aux ordres tant que le journal et les paramètres ne sont pas fournis. Continuez avec les étapes 2 et 3 ci-dessous.
+
+### Alternative : copier le code dans l'éditeur Cloudflare
+
 1. Créez un compte sur [Cloudflare](https://dash.cloudflare.com/sign-up) et conservez le forfait Workers Free.
 2. Dans **Workers & Pages**, créez un Worker JavaScript à partir du modèle Hello World et choisissez un nom, par exemple `bdltradingbot-api`.
 3. Ouvrez son éditeur de code. Remplacez le code du Worker par le contenu intégral de [cloudflare/worker.mjs](cloudflare/worker.mjs), puis déployez.
@@ -25,6 +40,10 @@ Le Worker refuse les routes privées tant que ses paramètres ne sont pas config
 2. Dans sa console SQL, exécutez les instructions de [cloudflare/schema.sql](cloudflare/schema.sql), une par une si la console l'exige. Ce script crée les tables sans effacer d'anciens ordres.
 3. Retournez dans votre Worker, puis **Bindings → Add binding → D1 database**. Nommez la liaison exactement **`DB`** et sélectionnez la base créée.
 4. Appliquez la liaison et redéployez si le tableau de bord le demande.
+
+**Si vous déployez depuis GitHub**, copiez ensuite le nom et l'UUID exacts de cette même base dans `wrangler.jsonc`, en ajoutant une section `d1_databases` contenant `binding: "DB"`, `database_name` et `database_id`. Le tableau de bord peut vous fournir le fragment de configuration à recopier. Cet UUID est un identifiant de ressource, pas une clé secrète. N'inventez pas d'UUID et ne déployez pas une configuration d'exemple avec un faux identifiant.
+
+Cette configuration doit être enregistrée dans le dépôt **avant d'activer le trading**, pour que les déploiements suivants conservent la même liaison. `keep_vars` conserve les variables définies dans le tableau de bord, mais ne remplace pas la déclaration de la base D1. L'absence de liaison D1 bloque les ordres ; elle ne doit pas être corrigée en créant un nouveau journal vide.
 
 Gardez toujours la même base pour ce compte Bitpanda. Ne la remplacez pas par une base vide pour débloquer un ordre. N'utilisez pas en parallèle un autre backend avec un journal indépendant pour le même bot.
 
@@ -69,3 +88,7 @@ Si une acceptation échoue, expire côté réseau ou réussit sans que D1 puisse
 Un arrêt du Worker pendant une demande de devis peut aussi laisser le verrou en `requesting`. Une intervention après vérification de l'état réel est alors nécessaire. Une base non initialisée, un quota ou une panne de D1 empêche l'envoi de nouveaux ordres plutôt que de travailler sans journal.
 
 Les tests couvrent le code du Worker avec une API fictive et SQLite local. La configuration et le fonctionnement sur l'infrastructure Cloudflare devront être vérifiés après création de votre compte et déploiement. Les quotas gratuits n'offrent pas une garantie de disponibilité continue.
+
+## Vérifier le déploiement depuis le dépôt
+
+Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les 14 tests hors ligne. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.

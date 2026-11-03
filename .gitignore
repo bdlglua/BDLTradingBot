@@ -4,3 +4,7 @@ reports/
 .state/
 .env
 _site/
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
