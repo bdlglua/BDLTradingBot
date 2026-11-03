@@ -1,0 +1,44 @@
+name: Publier l’interface GitHub Pages
+
+# Publication volontaire uniquement : aucun déploiement sur push ou pull request.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Vérifier le serveur et le connecteur hors ligne
+        run: python -m unittest discover -s tests -v
+      - name: Construire les seuls fichiers publics
+        run: python tools/build_pages.py
+        env:
+          DASHBOARD_API_URL: ${{ vars.DASHBOARD_API_URL }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publier
+        id: deployment
+        uses: actions/deploy-pages@v4

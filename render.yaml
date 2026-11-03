@@ -1,0 +1,25 @@
+# Exemple de backend HTTPS ; sa création et son disque peuvent être payants.
+services:
+  - type: web
+    name: bdltradingbot-api
+    runtime: docker
+    plan: starter
+    autoDeploy: false
+    healthCheckPath: /health
+    disk:
+      name: trading-journal
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DASHBOARD_PUBLIC_ORIGIN
+        sync: false
+      - key: DASHBOARD_ACCESS_TOKEN
+        generateValue: true
+      - key: BITPANDA_API_KEY
+        sync: false
+      - key: BITPANDA_ENABLE_TRADING
+        value: '0'
+      - key: BITPANDA_TRADING_CURRENCY_ID
+        sync: false
+      - key: BITPANDA_MAX_ORDER_AMOUNT
+        sync: false

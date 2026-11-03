@@ -1,0 +1,11 @@
+*
+!Dockerfile
+!access.py
+!bot.py
+!bitpanda.py
+!web.py
+!container_start.py
+!static/
+!static/**
+!examples/
+!examples/prices.csv
