@@ -29,7 +29,7 @@ jobs:
       - name: Construire les seuls fichiers publics
         run: python tools/build_pages.py
         env:
-          DASHBOARD_API_URL: ${{ vars.DASHBOARD_API_URL }}
+          DASHBOARD_API_URL: ${{ vars.DASHBOARD_API_URL || 'https://bdltradingbot.bdlminer-bot.workers.dev' }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

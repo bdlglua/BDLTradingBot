@@ -23,6 +23,8 @@ Le dépôt contient `wrangler.jsonc`, qui indique le point d'entrée `cloudflare
 
 Le nom du Worker dans Cloudflare doit correspondre au champ `name` de `wrangler.jsonc`. S'il est différent, adaptez ce champ au nom réel. Les secrets Bitpanda se règlent dans les paramètres **du Worker**, pas dans les paramètres de build.
 
+Pour ce dépôt, l'origine publique `https://bdlglua.github.io` est déjà déclarée dans `wrangler.jsonc` et l'interface préremplit l'adresse `https://bdltradingbot.bdlminer-bot.workers.dev`. Ces adresses sont publiques ; aucun secret n'est enregistré dans cette configuration. La variable GitHub `DASHBOARD_API_URL` peut toujours remplacer l'adresse du serveur pour un autre déploiement.
+
 Le premier déploiement n'exige aucune liaison D1 et ne crée pas de base automatiquement. Le Worker reste sans accès aux ordres tant que le journal et les paramètres ne sont pas fournis. Continuez avec les étapes 2 et 3 ci-dessous.
 
 ### Alternative : copier le code dans l'éditeur Cloudflare
