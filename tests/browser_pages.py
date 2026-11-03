@@ -32,7 +32,7 @@ def main():
                     if path == '/api/session':
                         data = {'csrf_token': 'fake-session'}
                     elif path == '/api/bitpanda/status':
-                        data = {'api_key_present': False, 'trading_enabled': False, 'reason': 'Clé API absente.'}
+                        data = {'api_key_present': False, 'trading_enabled': False, 'reason': 'Clé API absente.', 'features': {'backtest': False}}
                     elif path == '/api/bitpanda/journal':
                         data = {'orders': []}
                     else:
@@ -55,8 +55,13 @@ def main():
                 assert len(requests) == 3
                 assert page.evaluate('Object.values(localStorage).length') == 0
                 assert page.evaluate('Object.values(sessionStorage).length') == 0
+                page.locator('#nav-lab').click()
+                assert page.locator('#lab-capability').is_visible()
+                assert page.locator('#run').is_disabled()
+                page.locator('#nav-live').click()
                 page.locator('#server-disconnect').click()
                 expect(page.locator('#connection-title')).to_have_text('Serveur déconnecté')
+                assert page.locator('#run').is_enabled()
                 page.set_viewport_size({'width':390,'height':844})
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
                 page.screenshot(path='/tmp/bdl-pages-mobile.png', full_page=True)

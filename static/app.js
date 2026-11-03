@@ -40,6 +40,7 @@ function chart(points) {
 }
 $('form').addEventListener('submit', async event => {
   event.preventDefault(); $('error').textContent = ''; reset();
+  if(liveStatus?.features?.backtest===false) { $('error').textContent='Le laboratoire n’est pas disponible avec ce serveur.'; return; }
   if (!csv) { $('error').textContent = 'Importez un CSV ou chargez l’exemple.'; return; }
   const config = Object.fromEntries([...new FormData(event.target)].map(([k,v])=>[k,Number(v)]));
   for(const key of ['allocation','stop_loss','fee']) config[key] /= 100;
@@ -63,7 +64,7 @@ $('form').addEventListener('submit', async event => {
     }
     $('download').disabled=false;
   } catch(error) { $('error').textContent=error.message; }
-  finally { $('run').disabled=false; $('run').textContent='Lancer le backtest ↗'; inputs.forEach(el=>el.disabled=false); }
+  finally { $('run').disabled=liveStatus?.features?.backtest===false; $('run').textContent='Lancer le backtest ↗'; inputs.forEach(el=>el.disabled=false); }
 });
 $('download').addEventListener('click',()=>{
   if(!report)return;const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));
@@ -118,6 +119,8 @@ function tableRows(id, data) {
 }
 async function loadStatus() {
   liveStatus=await api('/api/bitpanda/status');
+  $('lab-capability').hidden=liveStatus.features?.backtest!==false;
+  $('run').disabled=liveStatus.features?.backtest===false;
   $('connection-title').textContent=liveStatus.api_key_present?'Clé configurée · Connexion à vérifier':'Compte Bitpanda non connecté';
   $('connection-detail').textContent=liveStatus.reason || 'Actualisez le compte pour vérifier l’accès à Bitpanda.';
   $('limits').textContent=liveStatus.max_order_amount?`Plafond par ordre : ${liveStatus.max_order_amount} · Devise autorisée : ${liveStatus.currency_id}`:'';
@@ -214,6 +217,7 @@ async function initializeServer() {
 function clearRemoteSession() {
   connectionRequests.abort();connectionRequests=new AbortController();
   accessToken='';sessionToken='';liveStatus=null;clearQuote();$('request-quote').disabled=true;
+  $('lab-capability').hidden=true;$('run').disabled=false;
   $('server-token').value='';$('connection-title').textContent='Serveur déconnecté';$('connection-detail').textContent='Reconnectez-vous pour consulter votre compte.';
   $('limits').textContent='';$('order-result').textContent='';$('live-error').textContent='';$('operations').textContent='';$('operations').hidden=true;
   tableRows('holdings',[]);tableRows('live-orders',[]);$('holdings-status').textContent='Compte à actualiser après connexion.';

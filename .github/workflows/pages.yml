@@ -19,8 +19,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - name: Vérifier le serveur et le connecteur hors ligne
         run: python -m unittest discover -s tests -v
+      - name: Vérifier le backend gratuit Workers et le journal D1 hors ligne
+        run: node cloudflare/tests/worker.test.mjs
       - name: Construire les seuls fichiers publics
         run: python tools/build_pages.py
         env:

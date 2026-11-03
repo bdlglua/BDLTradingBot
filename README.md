@@ -1,10 +1,10 @@
 # BDLTradingBot
 
-Interface de trading **Bitpanda Public API de production**, avec portefeuille, recherche d'actifs, demande de devis et confirmation d'ordres réels. Un laboratoire CSV séparé permet de tester une stratégie sans engager d'argent. Python 3.12 suffit ; aucune dépendance externe n'est nécessaire pour l'application.
+Interface de trading **Bitpanda Public API de production**, avec portefeuille, recherche d'actifs, demande de devis et confirmation d'ordres réels. Le backend peut être hébergé sans abonnement avec **Cloudflare Workers Free et D1** ; voir [le guide gratuit](CLOUDFLARE.md). Le backend Python 3.12 reste disponible pour le développement et le laboratoire CSV, sans dépendance externe.
 
 Le connecteur est implémenté à partir de la [documentation publique Bitpanda](https://github.com/bitpanda-labs/bitpanda-public-api), notamment le [schéma OpenAPI](https://github.com/bitpanda-labs/bitpanda-public-api/blob/master/docs/openapi.yaml). L'accès à votre compte et les produits disponibles doivent être vérifiés avec votre clé. Les tests automatisés utilisent des réponses fictives et ne prouvent pas qu'un ordre réel fonctionne sur votre compte.
 
-**Pour un site accessible depuis GitHub**, suivez [le guide GitHub Pages et backend hébergé](DEPLOYMENT.md). Les fichiers de déploiement sont fournis ; aucune publication n'est automatique. GitHub Pages héberge l'interface, tandis que le backend HTTPS conserve la clé et exécute les appels Bitpanda.
+**Pour le site accessible depuis GitHub**, suivez [le guide de déploiement](DEPLOYMENT.md). GitHub Pages héberge l'interface ; le backend HTTPS conserve la clé et exécute les appels Bitpanda. L'offre gratuite comporte des quotas ; les frais Bitpanda restent distincts. Le laboratoire Python n'est pas fourni par le Worker gratuit et est désactivé dans l'interface quand ce backend est connecté.
 
 ## Démarrage
 

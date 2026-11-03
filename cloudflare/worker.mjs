@@ -1,0 +1,219 @@
+// Backend Cloudflare Workers Free + D1. Aucun secret dans ce fichier.
+// API officielle : https://github.com/bitpanda-labs/bitpanda-public-api
+const BASE = 'https://api.public.bitpanda.com';
+const SCALE = 10n ** 18n;
+const encoder = new TextEncoder();
+class Failure extends Error {
+  constructor(message, status = 400) { super(message); this.status = status; }
+}
+function uuid(value) {
+  if (typeof value !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value)) throw new Failure('Identifiant UUID invalide.');
+  return value.toLowerCase();
+}
+function decimal(value) {
+  if (typeof value !== 'string' || !/^\d{1,16}(?:\.\d{1,18})?$/.test(value)) throw new Failure('Montant décimal positif requis, sans notation exponentielle.');
+  const [whole, fraction = ''] = value.split('.');
+  const scaled = BigInt(whole) * SCALE + BigInt(fraction.padEnd(18, '0'));
+  if (scaled <= 0n || scaled > 10n ** 15n * SCALE) throw new Failure('Montant hors limites.');
+  return scaled;
+}
+function expires(value) {
+  if (typeof value !== 'string' || !/(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Failure('Expiration du devis invalide.', 502);
+  return Date.parse(value);
+}
+function exactFields(data, fields) {
+  if (!data || Array.isArray(data) || typeof data !== 'object' || Object.keys(data).sort().join(',') !== fields.sort().join(',')) throw new Failure('Paramètres manquants ou inconnus.');
+}
+async function equal(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length > 512 || b.length > 512) return false;
+  const hashes = await Promise.all([a, b].map(text => crypto.subtle.digest('SHA-256', encoder.encode(text))));
+  const left = new Uint8Array(hashes[0]), right = new Uint8Array(hashes[1]);
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+function randomToken() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+async function csrf(secret) {
+  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode('BDLTradingBot/CSRF/v1'));
+  return Array.from(new Uint8Array(signature), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+function configuration(env) {
+  let origin;
+  try { origin = new URL(env.DASHBOARD_PUBLIC_ORIGIN); } catch { throw new Failure('Origine HTTPS du site à configurer.', 503); }
+  if (origin.protocol !== 'https:' || origin.origin !== env.DASHBOARD_PUBLIC_ORIGIN || origin.username || origin.password || origin.port) throw new Failure('Origine HTTPS exacte requise, sans chemin.', 503);
+  if (!/^[\x21-\x7e]{32,256}$/.test(env.DASHBOARD_ACCESS_TOKEN || '')) throw new Failure('Code d’accès au serveur à configurer.', 503);
+  return origin.origin;
+}
+function policy(env) {
+  if (env.BITPANDA_ENABLE_TRADING !== '1') throw new Failure('Trading réel désactivé dans les paramètres du serveur.', 503);
+  try { return {currency: uuid(env.BITPANDA_TRADING_CURRENCY_ID), limit: decimal(env.BITPANDA_MAX_ORDER_AMOUNT)}; }
+  catch { throw new Failure('Configurez la devise UUID et le plafond par ordre.', 503); }
+}
+function database(env) {
+  if (!env.DB) throw new Failure('Base D1 persistante non connectée.', 503);
+  // Primary-first reads keep an operation's state consistent with its writes.
+  return env.DB.withSession ? env.DB.withSession('first-primary') : env.DB;
+}
+async function readLimited(stream, maximum) {
+  if (!stream) return '';
+  const reader = stream.getReader(), chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > maximum) { await reader.cancel(); throw new Failure('Données trop volumineuses.', 413); }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const all = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { all.set(chunk, offset); offset += chunk.length; }
+  return new TextDecoder().decode(all);
+}
+async function jsonBody(request) {
+  if (request.headers.get('Content-Type')?.split(';')[0] !== 'application/json') throw new Failure('JSON requis.', 415);
+  try { return JSON.parse(await readLimited(request.body, 16384)); }
+  catch (error) { if (error instanceof Failure) throw error; throw new Failure('JSON invalide.'); }
+}
+
+export function createWorker(transport = fetch, now = Date.now) {
+  async function upstream(env, method, path, body) {
+    if (!env.BITPANDA_API_KEY) throw new Failure('Clé Bitpanda absente des secrets du serveur.', 503);
+    const headers = {'x-api-key': env.BITPANDA_API_KEY, Accept: 'application/json'};
+    const options = {method, headers, redirect: 'error', signal: AbortSignal.timeout(15000)};
+    if (body !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
+    let response;
+    try { response = await transport(BASE + path, options); }
+    catch { throw new Failure('Réponse Bitpanda indisponible. Aucun renvoi automatique.', 502); }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Failure(`Bitpanda a refusé la requête (HTTP ${response.status}).`, 502);
+    }
+    try {
+      const raw = await readLimited(response.body, 4000000);
+      return raw ? JSON.parse(raw) : {};
+    } catch { throw new Failure('Réponse Bitpanda illisible.', 502); }
+  }
+  async function quote(env, data) {
+    const {currency, limit} = policy(env);
+    exactFields(data, ['assetId', 'currencyId', 'side', 'notional']);
+    const payload = {assetId: uuid(data.assetId), currencyId: uuid(data.currencyId), side: data.side, notional: data.notional};
+    const requested = decimal(payload.notional);
+    if (!['BUY', 'SELL'].includes(payload.side) || payload.currencyId !== currency || requested > limit) throw new Failure('Sens invalide, devise non autorisée ou plafond dépassé.');
+    if (!env.BITPANDA_API_KEY) throw new Failure('Clé Bitpanda absente.', 503);
+    const db = database(env), owner = crypto.randomUUID(), timestamp = now();
+    const claim = await db.prepare("UPDATE gate SET owner=?,phase='requesting',release_at=0 WHERE id=1 AND (phase='idle' OR (phase='pending' AND release_at<=?))").bind(owner, timestamp).run();
+    if (claim.meta.changes !== 1) throw new Failure('Un devis est actif ou un ordre est à rapprocher avec Bitpanda. Nouvel ordre bloqué.', 409);
+    try {
+      const raw = await upstream(env, 'POST', '/rfq/quotes', payload);
+      if (!raw || typeof raw !== 'object') throw new Failure('Devis Bitpanda invalide.', 502);
+      const id = uuid(raw.id), assetId = uuid(raw.assetId), currencyId = uuid(raw.currencyId);
+      if (assetId !== payload.assetId || currencyId !== payload.currencyId || raw.side !== payload.side || decimal(raw.notional) !== requested || decimal(raw.notional) > limit) throw new Failure('Le devis ne correspond pas à la demande.', 502);
+      decimal(raw.price); decimal(raw.quantity);
+      const expiry = expires(raw.expiresAt);
+      if (expiry <= now()) throw new Failure('Devis déjà expiré.', 409);
+      const result = {id, assetId, currencyId, side: raw.side, notional: raw.notional, price: raw.price, quantity: raw.quantity, expiresAt: raw.expiresAt};
+      const token = randomToken();
+      const stored = await db.batch([
+        db.prepare("UPDATE orders SET state='expired' WHERE state='pending' AND expires<=?").bind(now()),
+        db.prepare('INSERT INTO orders (id,quote,token,state,expires,created) VALUES (?,?,?,\'pending\',?,?)').bind(id, JSON.stringify(result), token, expiry, new Date(now()).toISOString()),
+        db.prepare("UPDATE gate SET owner=?,phase='pending',release_at=? WHERE id=1 AND owner=? AND phase='requesting'").bind(id, expiry, owner),
+      ]);
+      if (stored[1].meta.changes !== 1 || stored[2].meta.changes !== 1) throw new Failure('Journal du devis non confirmé. Aucun ordre envoyé.', 503);
+      return {quote: result, confirmation_token: token};
+    } catch (error) {
+      // Only a quote was requested; no acceptance is sent on this path.
+      await db.prepare("UPDATE gate SET owner=NULL,phase='idle',release_at=0 WHERE id=1 AND owner=? AND phase='requesting'").bind(owner).run();
+      throw error;
+    }
+  }
+  async function accept(env, data) {
+    const {currency, limit} = policy(env);
+    exactFields(data, ['quote_id', 'confirmation_token', 'confirm_real_order']);
+    if (data.confirm_real_order !== true) throw new Failure('Confirmation explicite de l’ordre réel requise.');
+    const id = uuid(data.quote_id), db = database(env);
+    const row = await db.prepare('SELECT * FROM orders WHERE id=?').bind(id).first();
+    if (!row || !await equal(row.token, data.confirmation_token)) throw new Failure('Confirmation invalide.', 403);
+    if (row.state !== 'pending') throw new Failure('Ce devis a déjà été traité. Vérifiez le journal.', 409);
+    const saved = JSON.parse(row.quote);
+    if (row.expires <= now()) throw new Failure('Devis expiré.', 409);
+    if (saved.currencyId !== currency || decimal(saved.notional) > limit) throw new Failure('Le devis dépasse les limites actuelles.');
+    const claimed = await db.batch([
+      db.prepare("UPDATE orders SET state='submitted' WHERE id=? AND state='pending' AND EXISTS (SELECT 1 FROM gate WHERE id=1 AND owner=orders.id AND phase='pending')").bind(id),
+      db.prepare("UPDATE gate SET phase='submitted',release_at=0 WHERE id=1 AND owner=? AND phase='pending' AND EXISTS (SELECT 1 FROM orders WHERE id=? AND state='submitted')").bind(id, id),
+    ]);
+    if (claimed[0].meta.changes !== 1 || claimed[1].meta.changes !== 1) throw new Failure('Ordre déjà envoyé ou journal bloqué. Aucun renvoi.', 409);
+    // Durable claim precedes the financial call: crashes and double clicks cannot resend it.
+    try { await upstream(env, 'POST', `/rfq/quotes/${id}/accept`); }
+    catch {
+      await db.batch([
+        db.prepare("UPDATE orders SET state='unknown' WHERE id=? AND state='submitted'").bind(id),
+        db.prepare("UPDATE gate SET phase='unknown' WHERE id=1 AND owner=? AND phase='submitted'").bind(id),
+      ]);
+      throw new Failure('Résultat de l’ordre inconnu. Vérifiez les opérations sur Bitpanda : les nouveaux ordres sont bloqués.', 502);
+    }
+    await db.batch([
+      db.prepare("UPDATE orders SET state='executed' WHERE id=? AND state='submitted'").bind(id),
+      db.prepare("UPDATE gate SET owner=NULL,phase='idle',release_at=0 WHERE id=1 AND owner=? AND phase='submitted'").bind(id),
+    ]);
+    return {quote_id: id, state: 'executed', message: 'Bitpanda a confirmé l’exécution de l’ordre réel.'};
+  }
+  return {
+    async fetch(request, env) {
+      const url = new URL(request.url), incomingOrigin = request.headers.get('Origin');
+      let allowedOrigin = '';
+      function reply(status, data) {
+        const headers = {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', Vary: 'Origin'};
+        if (incomingOrigin && incomingOrigin === allowedOrigin) headers['Access-Control-Allow-Origin'] = allowedOrigin;
+        return new Response(JSON.stringify(data), {status, headers});
+      }
+      try {
+        if (url.pathname === '/health' && request.method === 'GET') return reply(200, {status: 'ok'});
+        allowedOrigin = configuration(env);
+        if (incomingOrigin && incomingOrigin !== allowedOrigin) throw new Failure('Origine refusée.', 403);
+        if (request.method === 'OPTIONS') {
+          const requestedHeaders = (request.headers.get('Access-Control-Request-Headers') || '').toLowerCase().split(',').map(name => name.trim()).filter(Boolean);
+          if (incomingOrigin !== allowedOrigin || !['GET', 'POST'].includes(request.headers.get('Access-Control-Request-Method')) || requestedHeaders.some(name => !['authorization', 'content-type', 'x-csrf-token'].includes(name))) throw new Failure('Prérequête refusée.', 403);
+          return new Response(null, {status: 204, headers: {'Access-Control-Allow-Origin': allowedOrigin, 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-CSRF-Token', 'Access-Control-Max-Age': '600', Vary: 'Origin'}});
+        }
+        if (!await equal(request.headers.get('Authorization'), 'Bearer ' + env.DASHBOARD_ACCESS_TOKEN)) throw new Failure('Code d’accès au serveur requis ou incorrect.', 401);
+        if (request.method === 'GET' && url.pathname === '/api/session') return reply(200, {csrf_token: await csrf(env.DASHBOARD_ACCESS_TOKEN)});
+        if (request.method === 'GET' && url.pathname === '/api/bitpanda/status') {
+          let enabled = false, reason = '';
+          try { policy(env); enabled = Boolean(env.BITPANDA_API_KEY && env.DB); } catch (error) { reason = error.message; }
+          if (!env.DB) reason = 'Base D1 persistante non connectée.';
+          else if (!env.BITPANDA_API_KEY) reason = 'Clé Bitpanda absente.';
+          return reply(200, {broker: 'Bitpanda', api_key_present: Boolean(env.BITPANDA_API_KEY), trading_enabled: enabled, currency_id: enabled ? env.BITPANDA_TRADING_CURRENCY_ID : null, max_order_amount: enabled ? env.BITPANDA_MAX_ORDER_AMOUNT : null, reason, connection_verified: false, features: {backtest: false}});
+        }
+        if (request.method === 'GET' && url.pathname === '/api/bitpanda/journal') {
+          const result = await database(env).prepare('SELECT id,quote,state,expires,created FROM orders ORDER BY created DESC LIMIT 100').all();
+          return reply(200, {orders: result.results.map(row => ({id: row.id, quote: JSON.parse(row.quote), state: row.state === 'pending' && row.expires <= now() ? 'expired' : row.state, created: row.created}))});
+        }
+        const reads = {'/api/bitpanda/assets': ['/assets', ['symbol', 'cursor']], '/api/bitpanda/currencies': ['/currencies', []], '/api/bitpanda/holdings': ['/portfolio/holdings', []], '/api/bitpanda/operations': ['/operations', ['cursor']]};
+        if (request.method === 'GET' && reads[url.pathname]) {
+          const [path, permitted] = reads[url.pathname], query = new URLSearchParams();
+          for (const [name, value] of url.searchParams) {
+            if (!permitted.includes(name) || value.length > 200 || query.has(name)) throw new Failure('Paramètres de recherche invalides.');
+            query.set(name, value);
+          }
+          if (permitted.length) query.set('pageSize', '50');
+          return reply(200, {result: await upstream(env, 'GET', path + (query.size ? '?' + query : ''))});
+        }
+        if (request.method === 'POST' && url.pathname === '/api/backtest') throw new Failure('Ce serveur gratuit fournit l’espace Bitpanda. Le laboratoire Python nécessite un serveur Python.', 501);
+        if (request.method === 'POST' && ['/api/bitpanda/quote', '/api/bitpanda/accept'].includes(url.pathname)) {
+          if (!await equal(request.headers.get('X-CSRF-Token'), await csrf(env.DASHBOARD_ACCESS_TOKEN))) throw new Failure('Session invalide. Reconnectez le serveur.', 403);
+          const data = await jsonBody(request);
+          return reply(200, url.pathname.endsWith('/quote') ? await quote(env, data) : await accept(env, data));
+        }
+        throw new Failure('Route introuvable.', 404);
+      } catch (error) {
+        return reply(error instanceof Failure ? error.status : 503, {error: error instanceof Failure ? error.message : 'Journal persistant indisponible. Aucun renvoi automatique : vérifiez Bitpanda avant toute nouvelle opération.'});
+      }
+    },
+  };
+}
+export default createWorker();
