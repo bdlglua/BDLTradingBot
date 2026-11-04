@@ -1,4 +1,5 @@
 """Construit uniquement les fichiers publics pour GitHub Pages."""
+import hashlib
 import json
 import os
 import shutil
@@ -25,10 +26,20 @@ def build(destination, api_url=''):
             raise ValueError('Le dossier de sortie contient des fichiers étrangers : construction interrompue.')
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
-    for name in ('index.html', 'style.css', 'app.js', 'favicon.svg'):
+    for name in ('style.css', 'app.js', 'favicon.svg'):
         shutil.copyfile(ROOT / 'static' / name, destination / name)
     config = {'apiBaseUrl': api_url, 'hosted': True}
     (destination / 'config.js').write_text('window.BDL_CONFIG = Object.freeze(' + json.dumps(config) + ');\n')
+    # Cache busting: each publication references assets by content hash, so
+    # browsers fetch the new CSS/JS instead of an outdated cached copy.
+    page = (ROOT / 'static' / 'index.html').read_text()
+    for name in ('style.css', 'config.js', 'app.js', 'favicon.svg'):
+        reference = f'"./{name}"'
+        if reference not in page:
+            raise ValueError(f'Référence {reference} introuvable dans index.html.')
+        version = hashlib.sha256((destination / name).read_bytes()).hexdigest()[:12]
+        page = page.replace(reference, f'"./{name}?v={version}"')
+    (destination / 'index.html').write_text(page)
     (destination / 'examples').mkdir()
     shutil.copyfile(ROOT / 'examples' / 'prices.csv', destination / 'examples' / 'prices.csv')
     (destination / '.nojekyll').touch()
