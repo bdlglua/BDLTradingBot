@@ -1,4 +1,5 @@
 """Construit uniquement les fichiers publics pour GitHub Pages."""
+import hashlib
 import json
 import os
 import shutil
@@ -10,7 +11,7 @@ else:
     from vault_export import starter_zip
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_FILES = ('index.html', 'style.css', 'app.js','automation.js', 'config.js', 'examples/prices.csv', '.nojekyll','obsidian-starter.zip')
+PUBLIC_FILES = ('index.html', 'style.css', 'app.js','automation.js', 'config.js', 'favicon.svg', 'examples/prices.csv', '.nojekyll','obsidian-starter.zip')
 
 
 def build(destination, api_url=''):
@@ -29,14 +30,24 @@ def build(destination, api_url=''):
             raise ValueError('Le dossier de sortie contient des fichiers étrangers : construction interrompue.')
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
-    for name in ('index.html', 'style.css', 'app.js','automation.js'):
+    for name in ('style.css', 'app.js','automation.js', 'favicon.svg'):
         shutil.copyfile(ROOT / 'static' / name, destination / name)
     config = {'apiBaseUrl': api_url, 'hosted': True}
     (destination / 'config.js').write_text('window.BDL_CONFIG = Object.freeze(' + json.dumps(config) + ');\n')
+    (destination / 'obsidian-starter.zip').write_bytes(starter_zip())
+    # Cache busting: each publication references assets by content hash, so
+    # browsers fetch the new CSS/JS instead of an outdated cached copy.
+    page = (ROOT / 'static' / 'index.html').read_text()
+    for name in ('style.css', 'config.js', 'app.js','automation.js', 'favicon.svg','obsidian-starter.zip'):
+        reference = f'"./{name}"'
+        if reference not in page:
+            raise ValueError(f'Référence {reference} introuvable dans index.html.')
+        version = hashlib.sha256((destination / name).read_bytes()).hexdigest()[:12]
+        page = page.replace(reference, f'"./{name}?v={version}"')
+    (destination / 'index.html').write_text(page)
     (destination / 'examples').mkdir()
     shutil.copyfile(ROOT / 'examples' / 'prices.csv', destination / 'examples' / 'prices.csv')
     (destination / '.nojekyll').touch()
-    (destination / 'obsidian-starter.zip').write_bytes(starter_zip())
     (destination / '.bdl-pages-build').write_text('public-assets-only\n')
 
 

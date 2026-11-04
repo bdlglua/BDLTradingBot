@@ -12,9 +12,9 @@ Par exemple, « un actif choisi, 10 unités de devise par achat, au plus 50 unit
 
 ## 1. Préparer D1 sans effacer l'historique
 
-Dans **la même base** que le journal Bitpanda, exécutez d'abord `cloudflare/schema.sql` si nécessaire, puis le complément [cloudflare/automation-schema.sql](cloudflare/automation-schema.sql). Les instructions `CREATE IF NOT EXISTS` ne vident pas les tables.
+Dans **la même base** que le journal Bitpanda, exécutez d'abord `cloudflare/schema.sql` si nécessaire. Après connexion au site, le bouton **Préparer le module dans D1** crée les tables supplémentaires sans effacer le journal. Vous pouvez aussi exécuter le complément [cloudflare/automation-schema.sql](cloudflare/automation-schema.sql) depuis la console D1. Les instructions `CREATE IF NOT EXISTS` ne vident pas les tables.
 
-La liaison `DB` et son UUID réel doivent être déclarés dans `wrangler.jsonc`, comme décrit dans CLOUDFLARE.md. Le dépôt ne contient pas cet UUID tant que vous ne l'avez pas fourni. Ne créez pas une base vide à la place d'un journal existant pour débloquer un cycle.
+La liaison de production `DB` et son UUID sont déjà déclarés dans `wrangler.jsonc` : conservez cette même base. La préparation du module reste à effectuer avant utilisation. Ne créez pas une base vide à la place du journal existant pour débloquer un cycle.
 
 ## 2. Préparer les autorisations Cloudflare
 
@@ -48,7 +48,7 @@ Le bouton **Mettre en pause** bloque les prochains envois, pas une acceptation d
 
 ## 4. Ce que fait la recherche
 
-Le module compare trois variantes de moyennes mobiles (3/12, 5/20, 10/40), ainsi que les paramètres valides de quatre notes Obsidian au maximum. Il conserve au plus 500 points pour la comparaison et une fenêtre roulante bornée dans D1.
+Le module compare trois variantes de moyennes mobiles (3/12, 5/20, 10/40), ainsi que les paramètres valides de quatre notes Obsidian au maximum. Il conserve au plus 500 points pour la comparaison et une fenêtre roulante bornée dans D1. Chaque point est un cours obtenu via `/v1/tickers/{id}` : son horodatage est celui de Bitpanda quand il est fourni, sinon celui de la réception. Les portefeuilles et devis utilisent les formats de production `/v1` du connecteur existant.
 
 Les paramètres sont fixés avant l'évaluation sur les 30 % de points les plus récents. Le modèle applique les frais estimés, exécute les signaux au point suivant, et affiche rendement, drawdown et transactions. Il ne modélise pas toute la liquidité, les arrondis de marché, la fiscalité ni tous les frais réels. Les résultats sont exploratoires sur un historique court, sans garantie sur les rendements futurs.
 
@@ -80,7 +80,7 @@ Obsidian Sync payant n'est pas requis. Cette extension synchronise votre apparei
 
 Un cycle est revendiqué durablement avant toute exécution. Un doublon du même déclenchement n'est pas rejoué. Les budgets sont réservés avant un achat et un résultat incertain continue de consommer le budget. Un état `collecting`, `reserved`, `submitting` ou `unknown` abandonné après une interruption bloque les cycles suivants jusqu'au rapprochement, plutôt que de renvoyer un ordre.
 
-En cas d'erreur après envoi ou d'écart avec le compte, consultez Bitpanda et les journaux avant de reprendre. La levée d'un verrou après rapprochement n'est pas encore proposée dans l'interface. Ne supprimez pas les lignes ou la base pour contourner ce blocage.
+En cas d'erreur après envoi ou d'écart avec le compte, consultez Bitpanda et les journaux avant de reprendre. L'onglet Historique conserve le rapprochement des devis manuels ; un cycle automatique abandonné exige en plus un rapprochement de son suivi de position et de sa réservation en base. Cette intervention n'est pas encore proposée dans l'écran Automatisation. Ne supprimez pas les lignes ou la base pour contourner ce blocage.
 
 Le forfait Cloudflare Free conserve ses quotas de requêtes, de CPU et de D1 ; les interruptions ou dépassements peuvent arrêter la collecte et les ordres. Les appels sont bornés à un seul actif et les calculs de comparaison utilisent des sommes roulantes pour limiter le CPU. Il n'y a pas de garantie de disponibilité continue ni de validation de charge sur votre compte Cloudflare. Les frais Bitpanda restent applicables.
 

@@ -8,7 +8,7 @@ D'après la [documentation Workers](https://developers.cloudflare.com/workers/pl
 
 Sur Free, atteindre un quota peut bloquer les requêtes. La [documentation D1](https://developers.cloudflare.com/d1/platform/pricing/#frequently-asked-questions) précise que les requêtes échouent quand les limites gratuites sont atteintes. Restez sur Workers **Free**, sans activer Workers Paid. Les plafonds et conditions de l'offre peuvent évoluer. Les frais de trading de Bitpanda restent applicables.
 
-Ce backend fournit le portefeuille, les ordres manuels et le module [Automatisation et Obsidian](AUTOMATISATION.md). Les ordres automatiques ne sont pas activés par défaut. Le laboratoire CSV Python n'y est pas exécuté ; l'interface le signale.
+Ce backend fournit le portefeuille, les ordres manuels et le module [Automatisation et Obsidian](AUTOMATISATION.md), désactivé par défaut. Le laboratoire CSV Python n'y est pas exécuté ; l'interface le signale.
 
 ## 1. Créer le compte et le Worker
 
@@ -20,16 +20,17 @@ Le dépôt contient `wrangler.jsonc`, qui indique le point d'entrée `cloudflare
 - Commande de build : aucune.
 - Commande de déploiement : `npx wrangler deploy`.
 - Branche de production : `main`.
+- Branches autres que `main` : Cloudflare exécute `npx wrangler preview`, qui utilise le bloc `previews` de `wrangler.jsonc`. Une Preview ne reçoit ni les secrets de production ni la base D1 : elle ne peut pas accéder au compte Bitpanda.
 
 Le nom du Worker dans Cloudflare doit correspondre au champ `name` de `wrangler.jsonc`. S'il est différent, adaptez ce champ au nom réel. Les secrets Bitpanda se règlent dans les paramètres **du Worker**, pas dans les paramètres de build.
 
 Pour ce dépôt, l'origine publique `https://bdlglua.github.io` est déjà déclarée dans `wrangler.jsonc` et l'interface préremplit l'adresse `https://bdltradingbot.bdlminer-bot.workers.dev`. Ces adresses sont publiques ; aucun secret n'est enregistré dans cette configuration. La variable GitHub `DASHBOARD_API_URL` peut toujours remplacer l'adresse du serveur pour un autre déploiement.
 
-Le premier déploiement n'exige aucune liaison D1 et ne crée pas de base automatiquement. Le Worker reste sans accès aux ordres tant que le journal et les paramètres ne sont pas fournis. Continuez avec les étapes 2 et 3 ci-dessous.
+Le premier déploiement n'exige aucune liaison D1 et ne crée pas de base automatiquement. Vous pouvez déjà connecter le site et lire votre portefeuille ; l'onglet Connexion signale le journal manquant. Le Worker reste sans accès aux ordres tant que le journal et les paramètres ne sont pas fournis. Continuez avec les étapes 2 et 3 ci-dessous.
 
 ### Créer le projet si nécessaire
 
-Créez un compte Cloudflare Free, puis utilisez **Workers & Pages → Create application → Import a repository** et choisissez ce dépôt. Le Worker utilise plusieurs modules : déployez le dépôt avec Wrangler, plutôt qu'un unique fichier copié dans Hello World. Cloudflare fournit une adresse HTTPS gratuite en `workers.dev`.
+Dans Cloudflare Free, choisissez **Workers & Pages → Create application → Import a repository**, puis ce dépôt. Le Worker utilise plusieurs modules : déployez le dépôt avec Wrangler. Cloudflare fournit une adresse HTTPS en `workers.dev`, sans achat de domaine.
 
 Le Worker refuse les routes privées tant que ses paramètres ne sont pas configurés. Il ne tente aucun ordre lors de son déploiement.
 
@@ -39,8 +40,6 @@ Le Worker refuse les routes privées tant que ses paramètres ne sont pas config
 2. Dans sa console SQL, exécutez les instructions de [cloudflare/schema.sql](cloudflare/schema.sql), une par une si la console l'exige. Ce script crée les tables sans effacer d'anciens ordres.
 3. Retournez dans votre Worker, puis **Bindings → Add binding → D1 database**. Nommez la liaison exactement **`DB`** et sélectionnez la base créée.
 4. Appliquez la liaison et redéployez si le tableau de bord le demande.
-
-Pour le module automatique et Obsidian, exécutez aussi [cloudflare/automation-schema.sql](cloudflare/automation-schema.sql) dans cette même base.
 
 **Si vous déployez depuis GitHub**, copiez ensuite le nom et l'UUID exacts de cette même base dans `wrangler.jsonc`, en ajoutant une section `d1_databases` contenant `binding: "DB"`, `database_name` et `database_id`. Le tableau de bord peut vous fournir le fragment de configuration à recopier. Cet UUID est un identifiant de ressource, pas une clé secrète. N'inventez pas d'UUID et ne déployez pas une configuration d'exemple avec un faux identifiant.
 
@@ -65,10 +64,12 @@ Enregistrez puis déployez les changements si Cloudflare le demande. Une clé d�
 
 ## 4. Connecter le site à ce serveur
 
-1. Ouvrez [votre site](https://bdlglua.github.io/BDLTradingBot/).
-2. Dans « Se connecter à votre serveur », saisissez l'adresse HTTPS `workers.dev` et le **code d'accès au tableau de bord**.
-3. Cliquez sur « Connecter le serveur », puis « Actualiser le compte ».
-4. Vérifiez que les positions réelles s'affichent. La liste des devises fournit les UUID à utiliser.
+1. Ouvrez [votre site](https://bdlglua.github.io/BDLTradingBot/), onglet **Connexion**.
+2. Vérifiez l'adresse HTTPS `workers.dev` et saisissez le **code d'accès au tableau de bord**.
+3. Cliquez sur « Connecter » : le compte est lu automatiquement et la liste de contrôle indique ce qui reste à configurer.
+4. Vérifiez dans **Portefeuille** que les positions réelles s'affichent.
+
+Si le site indique « Code d'accès DASHBOARD_ACCESS_TOKEN à configurer », le secret manque dans le Worker. « Serveur injoignable » signifie en général une adresse erronée ou une valeur `DASHBOARD_PUBLIC_ORIGIN` différente de `https://bdlglua.github.io`.
 
 Le code d'accès reste en mémoire dans cet onglet, sans stockage local ou session et sans être inscrit dans l'adresse. Votre clé Bitpanda reste dans les secrets du Worker.
 
@@ -84,12 +85,12 @@ La disponibilité des actifs et les autorisations API dépendent de votre compte
 
 Le verrou d'ordre et le journal sont persistés dans D1 avant l'appel financier. Les confirmations concurrentes, les redémarrages et les doubles clics ne renvoient pas le même devis. Aucune requête d'ordre n'est relancée automatiquement.
 
-Si une acceptation échoue, expire côté réseau ou réussit sans que D1 puisse enregistrer la réponse, l'état reste `unknown` ou `submitted` et le verrou bloque les nouveaux ordres. Vérifiez les opérations Bitpanda avant toute autre action. La levée du verrou après rapprochement n'est pas proposée dans l'interface : ne supprimez pas la base ou la ligne du verrou pour contourner cette protection.
+Si une acceptation échoue, expire côté réseau ou réussit sans que D1 puisse enregistrer la réponse, l'état reste `unknown` ou `submitted` et le verrou bloque les nouveaux ordres. Vérifiez les opérations Bitpanda, puis utilisez « Rapprocher » dans l'onglet Historique pour indiquer le résultat constaté : le journal est mis à jour sans aucun appel à Bitpanda et le verrou est levé. Ce rapprochement n'est possible que 30 secondes après l'expiration du devis. Ne supprimez pas la base ou la ligne du verrou pour contourner cette protection.
 
-Un arrêt du Worker pendant une demande de devis peut aussi laisser le verrou en `requesting`. Une intervention après vérification de l'état réel est alors nécessaire. Une base non initialisée, un quota ou une panne de D1 empêche l'envoi de nouveaux ordres plutôt que de travailler sans journal.
+Un arrêt du Worker pendant une demande de devis laissait le verrou en `requesting` : il se libère désormais seul après deux minutes, aucun devis n'ayant pu être accepté entre-temps. Une base non initialisée, un quota ou une panne de D1 empêche l'envoi de nouveaux ordres plutôt que de travailler sans journal.
 
-Les tests couvrent le code du Worker avec une API fictive et SQLite local. La configuration et le fonctionnement sur l'infrastructure Cloudflare devront être vérifiés après création de votre compte et déploiement. Les quotas gratuits n'offrent pas une garantie de disponibilité continue. Le [guide d'automatisation](AUTOMATISATION.md) explique les autorisations supplémentaires et le coffre Obsidian.
+Les tests couvrent le code du Worker avec une API fictive et SQLite local. La configuration et le fonctionnement sur l'infrastructure Cloudflare devront être vérifiés après création de votre compte et déploiement. Les quotas gratuits n'offrent pas une garantie de disponibilité continue.
 
 ## Vérifier le déploiement depuis le dépôt
 
-Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les tests hors ligne du Worker et de l'extension Obsidian. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.
+Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les tests hors ligne du Worker, de l’automatisation et de l’extension Obsidian. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.

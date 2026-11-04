@@ -29,18 +29,32 @@ class Config:
 
 
 def read_prices(path):
-    """CSV chronologique : timestamp ISO 8601 UTC, close positif."""
+    """CSV chronologique : colonnes timestamp et close (ISO 8601 avec fuseau, prix positif).
+
+    Accepte le séparateur « , » ou « ; » (export Excel français, avec virgule décimale)
+    et un éventuel BOM UTF-8.
+    """
     from datetime import datetime
     prices = []
     previous = None
-    with open(path, newline='', encoding='utf-8') as stream:
-        reader = csv.DictReader(stream)
-        if not {'timestamp', 'close'} <= set(reader.fieldnames or []):
+    with open(path, newline='', encoding='utf-8-sig') as stream:
+        header = stream.readline()
+        stream.seek(0)
+        delimiter = ';' if header.count(';') > header.count(',') else ','
+        reader = csv.DictReader(stream, delimiter=delimiter)
+        columns = {(name or '').strip().lower(): name for name in reader.fieldnames or []}
+        if not {'timestamp', 'close'} <= set(columns):
             raise ValueError('Colonnes CSV requises : timestamp,close.')
         for line, row in enumerate(reader, 2):
+            raw_stamp = (row.get(columns['timestamp']) or '').strip()
+            raw_close = (row.get(columns['close']) or '').strip()
+            if delimiter == ';':
+                raw_close = raw_close.replace(',', '.')
             try:
-                stamp = datetime.fromisoformat(row['timestamp'].replace('Z', '+00:00'))
-                price = float(row['close'])
+                if not raw_stamp or not raw_close:
+                    raise ValueError('valeur manquante')
+                stamp = datetime.fromisoformat(raw_stamp.replace('Z', '+00:00'))
+                price = float(raw_close)
                 if stamp.utcoffset() is None:
                     raise ValueError('fuseau horaire requis')
                 if not math.isfinite(price) or price <= 0:
@@ -49,7 +63,7 @@ def read_prices(path):
                     raise ValueError('dates strictement croissantes requises')
             except (ValueError, TypeError) as error:
                 raise ValueError(f'Ligne {line} : {error}') from error
-            prices.append((row['timestamp'], price))
+            prices.append((raw_stamp, price))
             previous = stamp
     return prices
 

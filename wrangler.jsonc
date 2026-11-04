@@ -8,5 +8,23 @@
   "keep_vars": true,
   "vars": {
     "DASHBOARD_PUBLIC_ORIGIN": "https://bdlglua.github.io"
+  },
+  // Journal persistant des ordres (production). L'identifiant n'est pas un secret.
+  // Ne remplacez jamais cette base par une base vide : elle empêche les doubles envois.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bdltradingbot",
+      "database_id": "29e906f4-f21b-4066-82a1-894b70f2c797"
+    }
+  ],
+  // Constructions des branches autres que main (`npx wrangler preview`).
+  // Une Preview ne reçoit ni les secrets de production ni la base D1 :
+  // elle ne peut pas accéder au compte Bitpanda ni passer d'ordre.
+  "previews": {
+    "vars": {
+      "DASHBOARD_PUBLIC_ORIGIN": "https://bdlglua.github.io"
+    },
+    "d1_databases": []
   }
 }

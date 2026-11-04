@@ -1,4 +1,5 @@
 import {CATALOG,noteCandidate,signal,compare} from './strategies.mjs';
+import {AUTOMATION_SCHEMA} from './automation-schema.mjs';
 const PERIOD=300000, SCALE=10n**18n;
 const units=value=>{const whole=value/SCALE, fraction=(value%SCALE).toString().padStart(18,'0').replace(/0+$/,'');return whole+(fraction?'.'+fraction:'');};
 const escape=value=>String(value??'').replace(/[\r\n|]/g,' ');
@@ -16,6 +17,12 @@ export function createAutomation({Failure,database,uuid,decimal,policy,quote,acc
       if(!row)throw Error();
       return {...row,enabled:row.enabled===1,settings:JSON.parse(row.settings),strategy:row.strategy?JSON.parse(row.strategy):null};
     } catch {throw new Failure('Initialisez automation-schema.sql dans la même base D1.',503);}
+  }
+  async function setup(env){
+    const db=database(env);
+    const commands=AUTOMATION_SCHEMA.split(';').map(sql=>sql.trim()).filter(Boolean);
+    await db.batch(commands.map(sql=>db.prepare(sql)));
+    return state(env);
   }
   async function prices(env,asset) {
     const result=await database(env).prepare('SELECT slot,price,currency FROM automation_prices WHERE asset=? ORDER BY slot DESC LIMIT 500').bind(asset).all();
@@ -41,21 +48,28 @@ export function createAutomation({Failure,database,uuid,decimal,policy,quote,acc
     const count=await db.prepare('SELECT COUNT(*) AS n FROM automation_prices WHERE asset=?').bind(c.settings.asset_id||'').first();
     const runs=await db.prepare('SELECT id,state,side,detail,created FROM automation_runs ORDER BY created DESC LIMIT 30').all();
     const notes=await db.prepare('SELECT id,title,content FROM automation_notes ORDER BY id').all();
-    return {settings:c.settings,enabled:c.enabled,strategy:c.strategy,revision:c.revision,position:position||null,
+    let currencyId=null;try{currencyId=uuid(env.BITPANDA_TRADING_CURRENCY_ID);}catch{}
+    return {settings:c.settings,currency_id:currencyId,enabled:c.enabled,strategy:c.strategy,revision:c.revision,position:position||null,
       points:count.n,research:comparison?JSON.parse(comparison.result):null,runs:runs.results,notes:notes.results,
       server_enabled:env.AUTOMATION_ENABLED==='1',trading_allowed:env.AUTOMATION_TRADING_ENABLED==='1'&&env.BITPANDA_ENABLE_TRADING==='1'};
   }
   async function save(env,data) {
-    const fields=['asset_id','order_amount','daily_buy_budget','stop_loss_pct','fee_pct'];
+    const fields=['asset_id','currency_id','order_amount','daily_buy_budget','stop_loss_pct','fee_pct'];
     if(!data||Object.keys(data).sort().join()!==fields.sort().join())throw new Failure('Paramètres d’automatisation incomplets.');
     const asset=uuid(data.asset_id), amount=cents(data.order_amount), budget=cents(data.daily_buy_budget);
+    const currency=uuid(data.currency_id);
+    if(currency!==uuid(env.BITPANDA_TRADING_CURRENCY_ID))throw new Failure('La devise serveur a changé. Actualisez avant enregistrement.');
     if(amount>budget)throw new Failure('Le montant par achat dépasse le budget quotidien.');
     const stop=data.stop_loss_pct===''?null:Number(data.stop_loss_pct), fee=Number(data.fee_pct);
     if((stop!==null&&(!Number.isFinite(stop)||stop<=0||stop>=100))||typeof data.fee_pct!=='string'||!/^\d{1,2}(?:\.\d{1,4})?$/.test(data.fee_pct)||!Number.isFinite(fee)||fee<0||fee>=10)throw new Failure('Pourcentages invalides.');
     const old=await config(env), db=database(env);
     const position=await db.prepare("SELECT asset FROM automation_position WHERE quantity!='0' LIMIT 1").first();
     if(position&&position.asset!==asset)throw new Failure('Une position du bot est encore ouverte : rapprochez-la avant de changer d’actif.',409);
-    const settings={asset_id:asset,order_amount:data.order_amount,daily_buy_budget:data.daily_buy_budget,stop_loss_pct:stop,fee_pct:fee};
+    if(old.settings.currency_id&&old.settings.currency_id!==currency){
+      const committed=await db.prepare('SELECT id FROM automation_runs WHERE day=? AND budget_cents>0 LIMIT 1').bind(new Date(now()).toISOString().slice(0,10)).first();
+      if(position||committed)throw new Failure('Conservez la devise tant qu’une position est ouverte ou qu’un budget est engagé aujourd’hui.',409);
+    }
+    const settings={asset_id:asset,currency_id:currency,order_amount:data.order_amount,daily_buy_budget:data.daily_buy_budget,stop_loss_pct:stop,fee_pct:fee};
     await db.prepare('UPDATE automation_config SET settings=?,revision=revision+1,enabled=0,strategy=? WHERE id=1').bind(JSON.stringify(settings),asset===old.settings.asset_id&&old.strategy?JSON.stringify(old.strategy):null).run();
     return state(env);
   }
@@ -81,6 +95,7 @@ export function createAutomation({Failure,database,uuid,decimal,policy,quote,acc
     if(env.AUTOMATION_ENABLED!=='1'||env.AUTOMATION_TRADING_ENABLED!=='1')throw new Failure('Les autorisations serveur de collecte et d’ordres automatiques doivent être activées par vous.',503);
     if(!env.BITPANDA_API_KEY)throw new Failure('Clé Bitpanda à configurer.',503);
     if(!c.settings.asset_id||!c.strategy)throw new Failure('Enregistrez les limites et approuvez une stratégie.');
+    if(c.settings.currency_id!==p.currency)throw new Failure('Enregistrez de nouveau les limites dans la devise actuelle.');
     if(decimal(c.settings.order_amount)>p.limit)throw new Failure('Le montant dépasse le plafond Bitpanda du serveur.');
     const unresolved=await database(env).prepare("SELECT id FROM automation_runs WHERE state IN ('collecting','reserved','submitting','unknown') LIMIT 1").first();
     if(unresolved)throw new Failure('Un cycle reste à rapprocher avant la reprise.',409);
@@ -120,7 +135,7 @@ export function createAutomation({Failure,database,uuid,decimal,policy,quote,acc
     const claim=await db.prepare("INSERT OR IGNORE INTO automation_runs(id,asset,slot,revision,state,day,created) SELECT ?,?,?,?,'collecting',?,? WHERE NOT EXISTS(SELECT 1 FROM automation_runs WHERE state IN ('collecting','reserved','submitting','unknown'))").bind(id,c.settings.asset_id,slot,c.revision,day,new Date(time).toISOString()).run();
     if(claim.meta.changes!==1)return {state:'duplicate_or_blocked'};
     let submitted=false;
-    const finish=async(state,detail='')=>{await db.prepare('UPDATE automation_runs SET state=?,detail=? WHERE id=?').bind(state,detail,id).run();return {state,detail};};
+    const finish=async(state,detail='')=>{await db.prepare("UPDATE automation_runs SET state=?,detail=? WHERE id=? AND state!='executed'").bind(state,detail,id).run();return {state,detail};};
     try {
       const ticker=await upstream(env,'GET',`/assets/${c.settings.asset_id}/ticker`);
       if(uuid(ticker.assetId)!==c.settings.asset_id||typeof ticker.currency!=='string'||!Number.isFinite(Date.parse(ticker.timestamp))||time-Date.parse(ticker.timestamp)>PERIOD*2||Date.parse(ticker.timestamp)-time>60000)throw new Failure('Cours absent, périmé ou incohérent.');
@@ -133,6 +148,7 @@ export function createAutomation({Failure,database,uuid,decimal,policy,quote,acc
       if(slot%12===0&&history.length>=200&&continuous(history))await research(env);
       if(!c.enabled||env.AUTOMATION_TRADING_ENABLED!=='1')return finish('observed','Collecte uniquement.');
       const p=policy(env);
+      if(c.settings.currency_id!==p.currency)throw new Failure('Devise serveur modifiée : réenregistrez les limites avant reprise.');
       if(!c.strategy||!continuous(history)||history.length<c.strategy.slow+1)return finish('warming_up','Historique consécutif insuffisant.');
       const currencies=await upstream(env,'GET','/currencies?id='+p.currency);
       const list=Array.isArray(currencies)?currencies:currencies?.data;
@@ -179,5 +195,5 @@ export function createAutomation({Failure,database,uuid,decimal,policy,quote,acc
       return finish(submitted?'unknown':'error',error instanceof Failure?error.message:'Erreur du cycle ; vérifiez le journal et Bitpanda.');
     }
   }
-  return {state,save,approve,pause,enable,research,notes,snapshot,tick};
+  return {state,setup,save,approve,pause,enable,research,notes,snapshot,tick};
 }

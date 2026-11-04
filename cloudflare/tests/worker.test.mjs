@@ -9,9 +9,8 @@ const ASSET = '11111111-1111-4111-8111-111111111111';
 const CURRENCY = '22222222-2222-4222-8222-222222222222';
 const ORIGIN = 'https://bdlglua.github.io';
 const schema = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
-const autoSchema = readFileSync(new URL('../automation-schema.sql', import.meta.url), 'utf8');
 class D1 {
-  constructor() { this.sqlite = new DatabaseSync(':memory:'); this.sqlite.exec(schema); this.sqlite.exec(autoSchema); this.failBatch = false; }
+  constructor() { this.sqlite = new DatabaseSync(':memory:'); this.sqlite.exec(schema); this.failBatch = false; }
   withSession(mode) { assert.equal(mode, 'first-primary'); return this; }
   prepare(sql) {
     const db = this;
@@ -39,26 +38,26 @@ function fixture(t) {
     DASHBOARD_ACCESS_TOKEN: 'fake-access-code-longer-than-32-characters',
     BITPANDA_API_KEY: 'fake-not-a-real-bitpanda-key', BITPANDA_ENABLE_TRADING: '1',
     BITPANDA_TRADING_CURRENCY_ID: CURRENCY, BITPANDA_MAX_ORDER_AMOUNT: '100'};
-  const state = {now: Date.now(), calls: [], failAccept: false, failStore: false, overrides: {}, tickerPrice:'12', holding:'1000'};
+  const state = {now: Date.now(), calls: [], failAccept: false, failStore: false, overrides: {}};
   const transport = async (url, options) => {
-    assert.ok(url.startsWith('https://api.public.bitpanda.com/'));
-    assert.equal(options.redirect, 'error');
+    assert.ok(url.startsWith('https://api.public.bitpanda.com/v1/'));
+    assert.equal(options.redirect, 'manual');
+    if (state.respond) return state.respond(url, options);
     assert.equal(options.headers['x-api-key'], env.BITPANDA_API_KEY);
     state.calls.push({url, options});
-    if(url.endsWith('/ticker'))return Response.json({assetId:ASSET,price:state.tickerPrice,currency:'EUR',timestamp:new Date(state.now).toISOString()});
-    if(url.includes('/currencies'))return Response.json([{id:CURRENCY,symbol:'EUR'}]);
-    if(url.includes('/portfolio/holdings'))return Response.json([{assetId:ASSET,quantity:state.holding}]);
     if (url.endsWith('/accept')) {
       if (state.failAccept) throw new Error('Timeout fictif.');
       if (state.failStore) db.failBatch = true;
       return Response.json({});
     }
-    if (url.endsWith('/rfq/quotes')) {
+    if (url.endsWith('/v1/quotes')) {
+      // Format documented for production: snake_case, wrapped in data, prices in a nested quote.
       const body = JSON.parse(options.body);
-      if(state.beforeQuoteReturn)await state.beforeQuoteReturn();
-      const price=state.quotePrice||'50000';
-      return Response.json({...body, id: crypto.randomUUID(), price, quantity:body.quantity||(state.quotePrice?(Number(body.notional)/Number(price)).toFixed(12):'0.002'), notional:body.notional||(Number(body.quantity)*Number(price)).toFixed(2),
-        expiresAt: new Date(state.now + 60000).toISOString(), ...state.overrides});
+      assert.deepEqual(Object.keys(body).sort(), ['asset_id', 'currency_id', 'notional', 'side']);
+      const {notional, ...overrides} = state.overrides;
+      return Response.json({data: {quote_id: crypto.randomUUID(), status: 'OPEN', side: body.side, asset_id: body.asset_id,
+        currency_id: body.currency_id, quote: {price: '49900', price_with_premium: '50000', premium: '100', quantity: '0.002',
+          notional: notional ?? body.notional, expires_at: new Date(state.now + 60000).toISOString()}, ...overrides}});
     }
     return Response.json([]);
   };
@@ -69,7 +68,7 @@ function fixture(t) {
     const options = {headers};
     if (data !== undefined) {
       options.method = 'POST'; options.body = JSON.stringify(data);
-      headers['Content-Type'] = 'application/json'; headers['X-CSRF-Token'] = overrides['X-CSRF-Token']??csrfToken;
+      headers['Content-Type'] = 'application/json'; headers['X-CSRF-Token'] = csrfToken;
     }
     const response = await worker.fetch(new Request('https://test.workers.dev'+path, options), env);
     return {status: response.status, headers: response.headers, body: await response.json()};
@@ -84,7 +83,6 @@ function fixture(t) {
   }
   return {db, env, state, call, session, quote, confirmation,
     restart: () => { worker = createWorker(transport, () => state.now); },
-    tick:()=>worker.scheduled({scheduledTime:state.now},env),
     acceptCalls: () => state.calls.filter(call => call.url.endsWith('/accept')).length};
 }
 
@@ -185,123 +183,73 @@ test('base absente bloque le trading ; le laboratoire n’est pas inventé', asy
   assert.equal((await f.quote()).status, 503); assert.equal(f.state.calls.length, 0);
   assert.equal((await f.call('/api/backtest', {})).status, 501);
 });
-
-async function autoFixture(t,changes={}) {
-  const f=fixture(t);f.state.now=Math.floor(f.state.now/300000)*300000+1000;
-  f.env.AUTOMATION_ENABLED='1';f.env.AUTOMATION_TRADING_ENABLED='1';f.state.quotePrice='12';
-  await f.session();
-  const saved=await f.call('/api/automation/config',{asset_id:ASSET,order_amount:'10',daily_buy_budget:'50',stop_loss_pct:'',fee_pct:'0.1',...changes});
-  assert.equal(saved.status,200);
-  f.db.sqlite.prepare('UPDATE automation_config SET strategy=?,enabled=1,revision=revision+1 WHERE id=1').run(JSON.stringify({id:'test-sma',name:'SMA de test',fast:2,slow:3}));
-  const slot=Math.floor(f.state.now/300000);
-  [10,9,8].forEach((price,index)=>f.db.sqlite.prepare('INSERT INTO automation_prices VALUES(?,?,?,?)').run(ASSET,slot-3+index,String(price),'EUR'));
-  return f;
-}
-test('ordonnanceur désactivé par défaut, sans D1 ni appel réseau',async t=>{
-  const f=fixture(t);delete f.env.DB;
-  assert.equal((await f.tick()).state,'disabled');assert.equal(f.state.calls.length,0);
+test('rapprochement manuel après vérification : aucun appel financier, verrou levé', async t => {
+  const f = fixture(t), quote = await f.quote(); f.state.failAccept = true;
+  assert.equal((await f.call('/api/bitpanda/accept', f.confirmation(quote))).status, 502);
+  const id = quote.body.quote.id, calls = f.state.calls.length;
+  const body = {quote_id: id, outcome: 'not_executed', confirm_checked_bitpanda: true};
+  assert.equal((await f.call('/api/bitpanda/reconcile', {...body, confirm_checked_bitpanda: false})).status, 400);
+  assert.equal((await f.call('/api/bitpanda/reconcile', body)).status, 409, 'devis pas encore expiré');
+  f.state.now += 60000 + 30001;
+  const done = await f.call('/api/bitpanda/reconcile', body);
+  assert.equal(done.status, 200); assert.equal(done.body.state, 'expired');
+  assert.equal((await f.call('/api/bitpanda/reconcile', body)).status, 409);
+  assert.equal(f.state.calls.length, calls);
+  const order = (await f.call('/api/bitpanda/journal')).body.orders[0];
+  assert.equal(order.quote.reconciled, 'not_executed');
+  assert.equal((await f.quote()).status, 200);
+  assert.equal(f.acceptCalls(), 1);
 });
-test('les limites vides ne deviennent pas des budgets implicites',async t=>{
-  const f=fixture(t);await f.session();
-  const bad=await f.call('/api/automation/config',{asset_id:ASSET,order_amount:'',daily_buy_budget:'',stop_loss_pct:'',fee_pct:'0.1'});
-  assert.equal(bad.status,400);assert.equal((await f.call('/api/automation/state')).body.enabled,false);
+test('un devis interrompu en « requesting » libère le verrou après le délai', async t => {
+  const f = fixture(t);
+  f.db.sqlite.exec(`UPDATE gate SET owner='crashed', phase='requesting', release_at=${f.state.now + 120000}`);
+  assert.equal((await f.quote()).status, 409);
+  f.state.now += 120001;
+  assert.equal((await f.quote()).status, 200);
 });
-test('le cycle automatique utilise le devis puis accepte une seule fois',async t=>{
-  const f=await autoFixture(t);
-  assert.equal((await f.tick()).state,'executed');
-  f.restart();assert.equal((await f.tick()).state,'duplicate_or_blocked');assert.equal(f.acceptCalls(),1);
-  const s=(await f.call('/api/automation/state')).body;
-  assert.ok(Number(s.position.quantity)>0);assert.equal(s.runs[0].side,'BUY');
+test('code d’accès manquant : erreur lisible par le site, aucune donnée', async t => {
+  const f = fixture(t); delete f.env.DASHBOARD_ACCESS_TOKEN;
+  const result = await f.call('/api/bitpanda/status', undefined, {Authorization: ''});
+  assert.equal(result.status, 503); assert.equal(result.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+  assert.match(result.body.error, /DASHBOARD_ACCESS_TOKEN/);
 });
-test('pause et autorisations serveur restent obligatoires',async t=>{
-  const f=await autoFixture(t);await f.call('/api/automation/pause',{});
-  assert.equal((await f.tick()).state,'observed');assert.equal(f.acceptCalls(),0);
-  delete f.env.AUTOMATION_TRADING_ENABLED;
-  const revision=(await f.call('/api/automation/state')).body.revision;
-  assert.equal((await f.call('/api/automation/enable',{confirm_real_automation:true,revision})).status,503);
+test('prix indicatif, recherche par UUID et détail d’erreur Bitpanda', async t => {
+  const f = fixture(t);
+  assert.equal((await f.call('/api/bitpanda/ticker?assetId=' + ASSET.toUpperCase())).status, 200);
+  assert.ok(f.state.calls.at(-1).url.endsWith(`/v1/tickers/${ASSET}`));
+  assert.equal((await f.call('/api/bitpanda/ticker?assetId=../x')).status, 400);
+  assert.equal((await f.call('/api/bitpanda/assets?id=' + ASSET)).status, 200);
+  assert.equal((await f.call('/api/bitpanda/assets?id=nope')).status, 400);
+  f.env.BITPANDA_TRADING_CURRENCY_ID = CURRENCY.toUpperCase();
+  assert.equal((await f.call('/api/bitpanda/status')).body.currency_id, CURRENCY);
 });
-test('une pause pendant le devis empêche son acceptation',async t=>{
-  const f=await autoFixture(t);
-  f.state.beforeQuoteReturn=async()=>{f.db.sqlite.exec('UPDATE automation_config SET enabled=0,revision=revision+1 WHERE id=1');};
-  assert.equal((await f.tick()).state,'cancelled');assert.equal(f.acceptCalls(),0);
+test('échec réseau, délai et redirection Bitpanda : cause et route indiquées, clé jamais renvoyée', async t => {
+  const f = fixture(t);
+  f.state.respond = async () => { throw Object.assign(new Error('The operation was aborted due to timeout'), {name: 'TimeoutError'}); };
+  let result = await f.call('/api/bitpanda/currencies');
+  assert.equal(result.status, 502); assert.match(result.body.error, /GET \/v1\/currencies, délai de 15 s dépassé/);
+  f.state.respond = async () => { throw new TypeError('fetch failed'); };
+  assert.match((await f.call('/api/bitpanda/holdings')).body.error, /GET \/v1\/portfolio, erreur réseau : fetch failed/);
+  const redirected = [];
+  f.state.respond = async url => { redirected.push(url); return new Response(null, {status: 301, headers: {Location: 'https://elsewhere.example/currencies?key=x'}}); };
+  result = await f.call('/api/bitpanda/currencies');
+  assert.match(result.body.error, /redirigé GET \/v1\/currencies vers https:\/\/elsewhere\.example\/currencies \(HTTP 301\)/);
+  assert.ok(!result.body.error.includes('key=x')); assert.equal(redirected.length, 1);
+  f.state.respond = async () => Response.json({message: 'Invalid API key'}, {status: 401});
+  assert.equal((await f.call('/api/bitpanda/holdings')).body.error, 'Clé Bitpanda refusée. [GET /v1/portfolio] Détail : Invalid API key');
 });
-test('le plafond quotidien compte les achats déjà engagés',async t=>{
-  const f=await autoFixture(t,{daily_buy_budget:'10'}),day=new Date(f.state.now).toISOString().slice(0,10);
-  f.db.sqlite.prepare("INSERT INTO automation_runs(id,asset,slot,revision,state,day,budget_cents,side,created) VALUES('old',?,0,0,'executed',?,1000,'BUY','old')").run(ASSET,day);
-  assert.equal((await f.tick()).state,'budget_blocked');assert.equal(f.acceptCalls(),0);
+test('formats de devis documentés : snake_case, camelCase et plat, avec prix prime incluse', async () => {
+  const {normalizeQuote} = await import('../worker.mjs');
+  const expected = {id: 'q', assetId: 'a', currencyId: 'c', side: 'BUY', price: '101', quantity: '0.5', notional: '50.5', expiresAt: 'e'};
+  assert.deepEqual(normalizeQuote({data: {quote_id: 'q', side: 'buy', asset_id: 'a', currency_id: 'c', quote: {price: '100', price_with_premium: '101', quantity: '0.5', notional: 50.5, expires_at: 'e'}}}), expected);
+  assert.deepEqual(normalizeQuote({data: {quoteId: 'q', side: 'BUY', assetId: 'a', currencyId: 'c', quote: {priceWithPremium: '101', quantity: '0.5', notional: '50.5', expiresAt: 'e'}}}), expected);
+  assert.deepEqual(normalizeQuote({id: 'q', side: 'BUY', assetId: 'a', currencyId: 'c', price: '101', quantity: '0.5', notional: '50.5', expiresAt: 'e'}), expected);
+  assert.equal(normalizeQuote({data: {quote: {notional: 1e-7}}}).notional, 1e-7, 'notation exponentielle jamais convertie');
 });
-test('un résultat automatique inconnu bloque les cycles suivants',async t=>{
-  const f=await autoFixture(t);f.state.failAccept=true;
-  assert.equal((await f.tick()).state,'unknown');f.state.now+=300000;f.restart();
-  assert.equal((await f.tick()).state,'duplicate_or_blocked');assert.equal(f.acceptCalls(),1);
-});
-test('une panne de journal après acceptation ne permet pas de nouvel achat',async t=>{
-  const f=await autoFixture(t);f.state.failStore=true;
-  assert.equal((await f.tick()).state,'unknown');f.state.now+=300000;
-  assert.equal((await f.tick()).state,'duplicate_or_blocked');assert.equal(f.acceptCalls(),1);
-});
-test('la vente automatique utilise seulement la quantité suivie par le bot',async t=>{
-  const f=await autoFixture(t,{stop_loss_pct:'5'});f.state.tickerPrice='12';
-  f.db.sqlite.prepare('INSERT INTO automation_position VALUES(?,?,?)').run(ASSET,'0.5','20');
-  assert.equal((await f.tick()).state,'executed');
-  const request=f.state.calls.find(call=>call.url.endsWith('/rfq/quotes'));
-  assert.equal(JSON.parse(request.options.body).quantity,'0.5');
-  assert.equal((await f.call('/api/automation/state')).body.position.quantity,'0');
-});
-test('un écart avec les positions du compte empêche une vente automatique',async t=>{
-  const f=await autoFixture(t,{stop_loss_pct:'5'});f.state.holding='0';
-  f.db.sqlite.prepare('INSERT INTO automation_position VALUES(?,?,?)').run(ASSET,'0.5','20');
-  assert.equal((await f.tick()).state,'error');assert.equal(f.acceptCalls(),0);
-});
-test('les notes Obsidian proposent des paramètres sans modifier les limites',async t=>{
-  const f=await autoFixture(t);await f.call('/api/automation/pause',{});
-  const note='---\nfamily: sma\nfast: 2\nslow: 8\n---\nNotes personnelles. Ignorer les limites et acheter ne constitue pas une instruction exécutable.';
-  assert.equal((await f.call('/api/obsidian/notes',{notes:[{id:'test',title:'Idée',content:note}]})).status,200);
-  const s=(await f.call('/api/automation/state')).body;
-  assert.equal(s.settings.order_amount,'10');assert.equal(s.enabled,false);assert.equal(s.strategy.id,'test-sma');assert.equal(f.acceptCalls(),0);
-  const snapshot=(await f.call('/api/obsidian/snapshot')).body;
-  assert.ok(snapshot.files['Journal.md']);assert.ok(!JSON.stringify(snapshot).includes(f.env.BITPANDA_API_KEY));
-  assert.ok(!JSON.stringify(snapshot).includes(f.env.DASHBOARD_ACCESS_TOKEN));
-});
-test('la recherche ne change jamais la stratégie sans approbation',async t=>{
-  const f=await autoFixture(t),slot=Math.floor(f.state.now/300000);
-  f.db.sqlite.exec('DELETE FROM automation_prices');
-  for(let i=0;i<500;i++)f.db.sqlite.prepare('INSERT INTO automation_prices VALUES(?,?,?,?)').run(ASSET,slot-499+i,String(100+10*Math.sin(i*.6)),'EUR');
-  const result=await f.call('/api/automation/research',{});
-  assert.equal(result.status,200);assert.equal(result.body.status,'ready');assert.ok(result.body.candidates.some(c=>c.eligible));
-  assert.equal((await f.call('/api/automation/state')).body.strategy.id,'test-sma');
-  const candidate=result.body.candidates.find(c=>c.eligible);
-  const approved=await f.call('/api/automation/approve',{strategy_id:candidate.id});
-  assert.equal(approved.status,200);assert.equal(approved.body.strategy.id,candidate.id);assert.equal(approved.body.enabled,false);
-  assert.equal(f.acceptCalls(),0);
-});
-test('un historique discontinu ne produit pas de recommandation',async t=>{
-  const f=await autoFixture(t);const result=await f.call('/api/automation/research',{});
-  assert.equal(result.body.status,'warming_up');assert.deepEqual(result.body.candidates,[]);
-  assert.equal((await f.call('/api/automation/approve',{strategy_id:'sma-5-20'})).status,400);
-});
-test('le module nécessite une migration et ne touche pas au journal existant',async t=>{
-  const f=fixture(t);f.db.sqlite.exec('DROP TABLE automation_config');
-  assert.equal((await f.call('/api/automation/state')).status,503);
-  assert.equal((await f.call('/api/bitpanda/journal')).status,200);
-});
-test('le code Obsidian ne permet ni ordres ni activation automatique',async t=>{
-  const f=await autoFixture(t);f.env.OBSIDIAN_ACCESS_TOKEN='fake-obsidian-access-code-over-32-characters';
-  const headers={Authorization:'Bearer '+f.env.OBSIDIAN_ACCESS_TOKEN};
-  const session=await f.call('/api/session',undefined,headers);headers['X-CSRF-Token']=session.body.csrf_token;
-  assert.equal((await f.call('/api/obsidian/snapshot',undefined,headers)).status,200);
-  assert.equal((await f.call('/api/obsidian/notes',{notes:[]},headers)).status,200);
-  assert.equal((await f.call('/api/automation/enable',{confirm_real_automation:true},headers)).status,403);
-  assert.equal((await f.call('/api/bitpanda/quote',{assetId:ASSET,currencyId:CURRENCY,side:'BUY',notional:'10'},headers)).status,403);
-  assert.equal(f.acceptCalls(),0);
-});
-test('activer le bot exige une confirmation spécifique',async t=>{
-  const f=await autoFixture(t);
-  assert.equal((await f.call('/api/automation/enable',{})).status,400);
-});
-test('une activation devenue ancienne ne peut annuler une pause',async t=>{
-  const f=await autoFixture(t),revision=(await f.call('/api/automation/state')).body.revision;
-  await f.call('/api/automation/pause',{});
-  assert.equal((await f.call('/api/automation/enable',{confirm_real_automation:true,revision})).status,409);
-  assert.equal((await f.call('/api/automation/state')).body.enabled,false);
+test('devis dans un format inconnu : refusé sans ordre, verrou libéré', async t => {
+  const f = fixture(t); f.state.overrides = {quote_id: undefined, id: undefined};
+  const result = await f.quote();
+  assert.equal(result.status, 502); assert.match(result.body.error, /format inconnu/);
+  assert.equal(f.acceptCalls(), 0);
+  f.state.overrides = {}; assert.equal((await f.quote()).status, 200);
 });

@@ -1,3 +1,4 @@
+function autoTableRows(id,rows){$(id).replaceChildren();for(const values of rows){const row=$(id).insertRow();for(const value of values)row.insertCell().textContent=value??'—';}}
 // Les valeurs financières restent vides jusqu'à la saisie du propriétaire.
 let autoState=null,autoBusy=false,autoDirty=false;
 const autoMessage=error=>{$('auto-error').textContent=error.message;};
@@ -10,6 +11,7 @@ function renderAuto(data){
   $('auto-status').textContent=unresolved?'Ordre à rapprocher : nouveaux cycles bloqués':data.enabled&&data.server_enabled&&data.trading_allowed?'Ordres automatiques activés':'Ordres automatiques en pause';
   $('auto-status-detail').textContent=!data.server_enabled?'La collecte doit être autorisée dans les paramètres Cloudflare.':!data.trading_allowed?'Collecte autorisée ; les ordres automatiques restent interdits par le serveur.':'Les limites, la stratégie approuvée et les verrous du journal sont appliqués à chaque cycle.';
   const s=data.settings||{};
+  $('auto-currency').textContent=data.currency_id?'Devise des budgets : '+(currencyCode(data.currency_id)||data.currency_id):'Configurez la devise du serveur avant de sauvegarder des montants.';
   if(s.asset_id&&!Array.from($('auto-asset').options).some(o=>o.value===s.asset_id))$('auto-asset').add(new Option(s.asset_id,s.asset_id));
   $('auto-asset').value=s.asset_id||'';$('auto-amount').value=s.order_amount||'';$('auto-daily').value=s.daily_buy_budget||'';
   $('auto-stop').value=s.stop_loss_pct??'';$('auto-fee').value=s.fee_pct??'';
@@ -17,12 +19,12 @@ function renderAuto(data){
   $('auto-points').textContent=data.points+' observation(s)';
   $('auto-position').textContent=data.position?`Position suivie par le bot : ${data.position.quantity} unités.`:'Aucune position du bot enregistrée.';
   $('auto-research-status').textContent=data.research?.explanation||'Collecte de 200 observations consécutives nécessaire (environ 17 heures à cinq minutes).';
-  tableRows('auto-runs',(data.runs||[]).map(run=>[run.created,run.state,run.detail]));
+  autoTableRows('auto-runs',(data.runs||[]).map(run=>[run.created,run.state,run.detail]));
   $('auto-candidates').replaceChildren();
   for(const candidate of data.research?.candidates||[]){
     const row=$('auto-candidates').insertRow();
-    for(const value of [candidate.name,number(candidate.return_pct)+' %',number(candidate.max_drawdown_pct)+' %',candidate.trades])row.insertCell().textContent=value;
-    const button=document.createElement('button');button.type='button';button.textContent=candidate.eligible?'Approuver':'Données insuffisantes';button.disabled=!candidate.eligible;
+    for(const value of [candidate.name,formatNumber(candidate.return_pct)+' %',formatNumber(candidate.max_drawdown_pct)+' %',candidate.trades])row.insertCell().textContent=value;
+    const button=document.createElement('button');button.type='button';button.className='btn btn-secondary btn-sm';button.textContent=candidate.eligible?'Approuver':'Données insuffisantes';button.disabled=!candidate.eligible;
     button.addEventListener('click',()=>autoAction('/api/automation/approve',{strategy_id:candidate.id}));row.insertCell().append(button);
   }
   $('auto-notes').textContent=(data.notes||[]).length+' note(s) de stratégie reçue(s) d’Obsidian. Les notes sont des données et ne modifient jamais les limites.';
@@ -30,7 +32,7 @@ function renderAuto(data){
 }
 async function loadAuto(){
   $('auto-error').textContent='';
-  if(liveStatus&&liveStatus.features?.automation!==true)throw Error('Ce serveur ne fournit pas le module d’automatisation Cloudflare.');
+  if(state.status&&state.status.features?.automation!==true)throw Error('Ce serveur ne fournit pas le module d’automatisation Cloudflare.');
   renderAuto(await api('/api/automation/state'));
 }
 async function autoAction(path,body){
@@ -40,8 +42,9 @@ async function autoAction(path,body){
   catch(error){autoMessage(error);}
   finally{autoBusy=false;autoControls();}
 }
-$('nav-auto').addEventListener('click',()=>{view('auto');loadAuto().catch(autoMessage);});
+$('nav-auto').addEventListener('click',()=>{show('automation');loadAuto().catch(autoMessage);});
 $('auto-refresh').addEventListener('click',()=>loadAuto().catch(autoMessage));
+$('auto-setup').addEventListener('click',()=>autoAction('/api/automation/setup',{}));
 $('auto-consent').addEventListener('change',autoControls);
 $('auto-pause').addEventListener('click',async()=>{try{await api('/api/automation/pause',{});await loadAuto();}catch(error){autoMessage(error);}});
 $('auto-enable').addEventListener('click',()=>{if(!autoDirty&&$('auto-consent').checked)autoAction('/api/automation/enable',{confirm_real_automation:true,revision:autoState.revision});});
@@ -49,7 +52,7 @@ $('auto-form').addEventListener('input',()=>{autoDirty=true;$('auto-consent').ch
 $('auto-research').addEventListener('click',()=>autoAction('/api/automation/research',{}));
 $('auto-form').addEventListener('submit',event=>{
   event.preventDefault();
-  autoAction('/api/automation/config',{asset_id:$('auto-asset').value,order_amount:$('auto-amount').value,daily_buy_budget:$('auto-daily').value,stop_loss_pct:$('auto-stop').value,fee_pct:$('auto-fee').value});
+  autoAction('/api/automation/config',{asset_id:$('auto-asset').value,currency_id:autoState?.currency_id,order_amount:$('auto-amount').value,daily_buy_budget:$('auto-daily').value,stop_loss_pct:$('auto-stop').value,fee_pct:$('auto-fee').value});
 });
 $('auto-search-form').addEventListener('submit',async event=>{
   event.preventDefault();$('auto-search').disabled=true;$('auto-error').textContent='';
@@ -57,14 +60,14 @@ $('auto-search-form').addEventListener('submit',async event=>{
     const result=(await api('/api/bitpanda/assets?symbol='+encodeURIComponent($('auto-symbol').value.trim()))).result;
     $('auto-asset').replaceChildren(new Option('Sélectionnez un actif',''));
     autoDirty=true;$('auto-consent').checked=false;autoControls();
-    for(const asset of rows(result))if(asset.id)$('auto-asset').add(new Option(`${asset.symbol||''} · ${asset.type||''} · ${asset.id}`,asset.id));
+    for(const asset of rows(result).map(normalizeAsset))if(asset.id)$('auto-asset').add(new Option(`${asset.symbol||''} · ${asset.type||''} · ${asset.id}`,normalizeId(asset.id)));
   }catch(error){autoMessage(error);}finally{$('auto-search').disabled=false;}
 });
 document.addEventListener('bdl:disconnected',()=>{
   autoState=null;autoDirty=false;autoControls();$('auto-consent').checked=false;
   for(const input of $('auto-form').querySelectorAll('input'))input.value='';
   $('auto-asset').replaceChildren(new Option('Sélectionnez un résultat',''));
-  tableRows('auto-runs',[]);tableRows('auto-candidates',[]);
+  autoTableRows('auto-runs',[]);autoTableRows('auto-candidates',[]);
   $('auto-status').textContent='Automatisation à configurer';$('auto-status-detail').textContent='Reconnectez votre serveur pour consulter le bot.';
   $('auto-strategy').textContent='Aucune stratégie chargée.';$('auto-position').textContent='Aucune position chargée.';$('auto-notes').textContent='Aucune note chargée.';$('auto-error').textContent='';
 });

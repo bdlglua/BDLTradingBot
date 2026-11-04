@@ -40,6 +40,19 @@ class BotTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     read_prices(path)
 
+    def test_csv_excel_semicolon_bom_and_header_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'prices.csv'
+            path.write_text('\ufeffTimestamp;Close\n2026-01-01T00:00:00+01:00;10,5\n2026-01-02T00:00:00+01:00;11\n', encoding='utf-8')
+            self.assertEqual(read_prices(path), [('2026-01-01T00:00:00+01:00', 10.5), ('2026-01-02T00:00:00+01:00', 11.0)])
+
+    def test_csv_missing_value_is_a_clear_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'prices.csv'
+            path.write_text('timestamp,close\n2026-01-01T00:00:00Z\n')
+            with self.assertRaisesRegex(ValueError, 'Ligne 2'):
+                read_prices(path)
+
 
 if __name__ == '__main__':
     unittest.main()
