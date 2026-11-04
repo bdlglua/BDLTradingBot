@@ -4,6 +4,7 @@
   "main": "cloudflare/worker.mjs",
   "compatibility_date": "2026-01-01",
   "workers_dev": true,
+  "triggers": {"crons": ["*/5 * * * *"]},
   "keep_vars": true,
   "vars": {
     "DASHBOARD_PUBLIC_ORIGIN": "https://bdlglua.github.io"

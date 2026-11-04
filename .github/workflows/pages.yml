@@ -25,7 +25,7 @@ jobs:
       - name: Vérifier le serveur et le connecteur hors ligne
         run: python -m unittest discover -s tests -v
       - name: Vérifier le backend gratuit Workers et le journal D1 hors ligne
-        run: node cloudflare/tests/worker.test.mjs
+        run: npm run test:worker
       - name: Construire les seuls fichiers publics
         run: python tools/build_pages.py
         env:

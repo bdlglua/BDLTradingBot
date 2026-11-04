@@ -2,6 +2,8 @@
 
 Interface de trading **Bitpanda Public API de production**, avec portefeuille, recherche d'actifs, demande de devis et confirmation d'ordres réels. Le backend peut être hébergé sans abonnement avec **Cloudflare Workers Free et D1** ; voir [le guide gratuit](CLOUDFLARE.md). Le backend Python 3.12 reste disponible pour le développement et le laboratoire CSV, sans dépendance externe.
 
+Le module [Automatisation et Obsidian](AUTOMATISATION.md) ajoute la collecte planifiée, les budgets à renseigner, les ordres automatiques soumis à autorisations, la comparaison de variantes et un coffre Obsidian téléchargeable. Les ordres automatiques sont désactivés par défaut ; tout changement de stratégie reste à approuver par vous.
+
 Le connecteur est implémenté à partir de la [documentation publique Bitpanda](https://github.com/bitpanda-labs/bitpanda-public-api), notamment le [schéma OpenAPI](https://github.com/bitpanda-labs/bitpanda-public-api/blob/master/docs/openapi.yaml). L'accès à votre compte et les produits disponibles doivent être vérifiés avec votre clé. Les tests automatisés utilisent des réponses fictives et ne prouvent pas qu'un ordre réel fonctionne sur votre compte.
 
 **Pour le site accessible depuis GitHub**, suivez [le guide de déploiement](DEPLOYMENT.md). GitHub Pages héberge l'interface ; le backend HTTPS conserve la clé et exécute les appels Bitpanda. L'offre gratuite comporte des quotas ; les frais Bitpanda restent distincts. Le laboratoire Python n'est pas fourni par le Worker gratuit et est désactivé dans l'interface quand ce backend est connecté.
@@ -39,7 +41,7 @@ Le journal SQLite privé `.state/bitpanda.sqlite3` (ou le fichier `bitpanda.sqli
 
 Une acceptation est enregistrée comme envoyée **avant** l'appel distant. Elle n'est jamais renvoyée automatiquement, même après timeout ou redémarrage. Un résultat ambigu devient `unknown` (ou reste `submitted` si le processus s'interrompt) et bloque les nouvelles demandes. Consultez les opérations réelles de Bitpanda et faites rapprocher ce devis avant toute reprise. La levée de ce blocage après rapprochement n'est pas encore proposée dans l'interface ; ne supprimez pas le journal pour le contourner.
 
-Il n'y a pas encore de trading autonome, de stop réel, de boucle de stratégie sur données de marché ni de surveillance continue. Les paramètres de moyennes mobiles, allocation et stop du laboratoire n'agissent **pas** sur les ordres Bitpanda.
+Le backend Python conserve les ordres manuels. L'automatisation du Worker est distincte et exige la migration D1 ainsi que les autorisations et réglages de son guide. Les paramètres du laboratoire n'agissent **pas** sur les ordres Bitpanda.
 
 ### Ligne de commande et tests
 

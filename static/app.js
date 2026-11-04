@@ -96,11 +96,14 @@ async function api(path, body) {
   return data;
 }
 function view(live) {
-  $('live-view').hidden=!live; $('lab-view').hidden=live;
-  $('nav-live').classList.toggle('active',live); $('nav-lab').classList.toggle('active',!live);
-  $('nav-live').setAttribute('aria-pressed',String(live)); $('nav-lab').setAttribute('aria-pressed',String(!live));
-  $('breadcrumb').textContent='ESPACE DE TRAVAIL / '+(live?'BITPANDA':'LABORATOIRE');
-  $('mode-badge').textContent=live?'● Compte Bitpanda · Réel':'● Simulation';
+  const selected=live===true?'live':live===false?'lab':live;
+  for(const name of ['live','lab','auto']) {
+    $(name+'-view').hidden=selected!==name;
+    $('nav-'+name).classList.toggle('active',selected===name);
+    $('nav-'+name).setAttribute('aria-pressed',String(selected===name));
+  }
+  $('breadcrumb').textContent='ESPACE DE TRAVAIL / '+({live:'BITPANDA',lab:'LABORATOIRE',auto:'AUTOMATISATION'}[selected]);
+  $('mode-badge').textContent=selected==='lab'?'● Simulation':selected==='auto'?'● Automatisation · À vérifier':'● Compte Bitpanda · Réel';
 }
 $('nav-live').addEventListener('click',()=>view(true)); $('nav-lab').addEventListener('click',()=>view(false));
 function clearQuote() {
@@ -213,6 +216,7 @@ $('read-operations').addEventListener('click',async()=>{
 });
 async function initializeServer() {
   sessionToken=(await api('/api/session')).csrf_token;await loadStatus();await journal();
+  document.dispatchEvent(new Event('bdl:connected'));
 }
 function clearRemoteSession() {
   connectionRequests.abort();connectionRequests=new AbortController();
@@ -223,6 +227,7 @@ function clearRemoteSession() {
   tableRows('holdings',[]);tableRows('live-orders',[]);$('holdings-status').textContent='Compte à actualiser après connexion.';
   $('asset-id').replaceChildren(new Option('Recherchez et sélectionnez un actif',''));
   $('currency-id').replaceChildren(new Option('Actualisez le compte',''));
+  document.dispatchEvent(new Event('bdl:disconnected'));
 }
 $('server-form').addEventListener('submit',async event=>{
   event.preventDefault(); if(orderBusy)return;

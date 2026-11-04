@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 from bot import Config, backtest, read_prices
 from bitpanda import BrokerError, TradingService
 from access import AccessPolicy
+from tools.vault_export import starter_zip
 
 ROOT = Path(__file__).resolve().parent
 MAX_BODY = 2_000_000
@@ -51,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         if self.path == '/health':
             return self.reply(200, {'status': 'ok'})
+        if self.path == '/obsidian-starter.zip':
+            return self.reply(200,starter_zip(),'application/zip')
         if parsed.path == '/api/session':
             return self.reply(200, {'csrf_token': self.csrf_token})
         if parsed.path == '/api/bitpanda/status':
@@ -71,6 +74,7 @@ class Handler(BaseHTTPRequestHandler):
             except BrokerError as error:
                 return self.reply(error.status, {'error': str(error)})
         routes = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'),
+                  '/automation.js': ('automation.js','text/javascript'),
                   '/style.css': ('style.css', 'text/css'), '/config.js': ('config.js', 'text/javascript'),
                   '/examples/prices.csv': ('../examples/prices.csv', 'text/csv')}
         if self.path == '/api/example':

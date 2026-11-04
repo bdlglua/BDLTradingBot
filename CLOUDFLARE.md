@@ -8,7 +8,7 @@ D'après la [documentation Workers](https://developers.cloudflare.com/workers/pl
 
 Sur Free, atteindre un quota peut bloquer les requêtes. La [documentation D1](https://developers.cloudflare.com/d1/platform/pricing/#frequently-asked-questions) précise que les requêtes échouent quand les limites gratuites sont atteintes. Restez sur Workers **Free**, sans activer Workers Paid. Les plafonds et conditions de l'offre peuvent évoluer. Les frais de trading de Bitpanda restent applicables.
 
-Ce backend fournit le portefeuille, la recherche d'actifs, les devis et les confirmations d'ordres réels. Le laboratoire CSV Python n'y est pas exécuté ; l'interface le signale. Aucun trading autonome ou stop réel n'est activé.
+Ce backend fournit le portefeuille, les ordres manuels et le module [Automatisation et Obsidian](AUTOMATISATION.md). Les ordres automatiques ne sont pas activés par défaut. Le laboratoire CSV Python n'y est pas exécuté ; l'interface le signale.
 
 ## 1. Créer le compte et le Worker
 
@@ -27,12 +27,9 @@ Pour ce dépôt, l'origine publique `https://bdlglua.github.io` est déjà décl
 
 Le premier déploiement n'exige aucune liaison D1 et ne crée pas de base automatiquement. Le Worker reste sans accès aux ordres tant que le journal et les paramètres ne sont pas fournis. Continuez avec les étapes 2 et 3 ci-dessous.
 
-### Alternative : copier le code dans l'éditeur Cloudflare
+### Créer le projet si nécessaire
 
-1. Créez un compte sur [Cloudflare](https://dash.cloudflare.com/sign-up) et conservez le forfait Workers Free.
-2. Dans **Workers & Pages**, créez un Worker JavaScript à partir du modèle Hello World et choisissez un nom, par exemple `bdltradingbot-api`.
-3. Ouvrez son éditeur de code. Remplacez le code du Worker par le contenu intégral de [cloudflare/worker.mjs](cloudflare/worker.mjs), puis déployez.
-4. Cloudflare fournit une adresse HTTPS en `workers.dev`. Gardez-la : vous la saisirez dans le site GitHub. Aucun domaine personnel n'est nécessaire.
+Créez un compte Cloudflare Free, puis utilisez **Workers & Pages → Create application → Import a repository** et choisissez ce dépôt. Le Worker utilise plusieurs modules : déployez le dépôt avec Wrangler, plutôt qu'un unique fichier copié dans Hello World. Cloudflare fournit une adresse HTTPS gratuite en `workers.dev`.
 
 Le Worker refuse les routes privées tant que ses paramètres ne sont pas configurés. Il ne tente aucun ordre lors de son déploiement.
 
@@ -42,6 +39,8 @@ Le Worker refuse les routes privées tant que ses paramètres ne sont pas config
 2. Dans sa console SQL, exécutez les instructions de [cloudflare/schema.sql](cloudflare/schema.sql), une par une si la console l'exige. Ce script crée les tables sans effacer d'anciens ordres.
 3. Retournez dans votre Worker, puis **Bindings → Add binding → D1 database**. Nommez la liaison exactement **`DB`** et sélectionnez la base créée.
 4. Appliquez la liaison et redéployez si le tableau de bord le demande.
+
+Pour le module automatique et Obsidian, exécutez aussi [cloudflare/automation-schema.sql](cloudflare/automation-schema.sql) dans cette même base.
 
 **Si vous déployez depuis GitHub**, copiez ensuite le nom et l'UUID exacts de cette même base dans `wrangler.jsonc`, en ajoutant une section `d1_databases` contenant `binding: "DB"`, `database_name` et `database_id`. Le tableau de bord peut vous fournir le fragment de configuration à recopier. Cet UUID est un identifiant de ressource, pas une clé secrète. N'inventez pas d'UUID et ne déployez pas une configuration d'exemple avec un faux identifiant.
 
@@ -89,8 +88,8 @@ Si une acceptation échoue, expire côté réseau ou réussit sans que D1 puisse
 
 Un arrêt du Worker pendant une demande de devis peut aussi laisser le verrou en `requesting`. Une intervention après vérification de l'état réel est alors nécessaire. Une base non initialisée, un quota ou une panne de D1 empêche l'envoi de nouveaux ordres plutôt que de travailler sans journal.
 
-Les tests couvrent le code du Worker avec une API fictive et SQLite local. La configuration et le fonctionnement sur l'infrastructure Cloudflare devront être vérifiés après création de votre compte et déploiement. Les quotas gratuits n'offrent pas une garantie de disponibilité continue.
+Les tests couvrent le code du Worker avec une API fictive et SQLite local. La configuration et le fonctionnement sur l'infrastructure Cloudflare devront être vérifiés après création de votre compte et déploiement. Les quotas gratuits n'offrent pas une garantie de disponibilité continue. Le [guide d'automatisation](AUTOMATISATION.md) explique les autorisations supplémentaires et le coffre Obsidian.
 
 ## Vérifier le déploiement depuis le dépôt
 
-Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les 14 tests hors ligne. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.
+Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les tests hors ligne du Worker et de l'extension Obsidian. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.

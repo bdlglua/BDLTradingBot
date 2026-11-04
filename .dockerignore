@@ -9,3 +9,9 @@
 !static/**
 !examples/
 !examples/prices.csv
+!tools/
+!tools/vault_export.py
+!obsidian-plugin/
+!obsidian-plugin/**
+!vault/
+!vault/**

@@ -4,9 +4,13 @@ import os
 import shutil
 from pathlib import Path
 from urllib.parse import urlsplit
+if __package__:
+    from .vault_export import starter_zip
+else:
+    from vault_export import starter_zip
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_FILES = ('index.html', 'style.css', 'app.js', 'config.js', 'examples/prices.csv', '.nojekyll')
+PUBLIC_FILES = ('index.html', 'style.css', 'app.js','automation.js', 'config.js', 'examples/prices.csv', '.nojekyll','obsidian-starter.zip')
 
 
 def build(destination, api_url=''):
@@ -25,13 +29,14 @@ def build(destination, api_url=''):
             raise ValueError('Le dossier de sortie contient des fichiers étrangers : construction interrompue.')
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
-    for name in ('index.html', 'style.css', 'app.js'):
+    for name in ('index.html', 'style.css', 'app.js','automation.js'):
         shutil.copyfile(ROOT / 'static' / name, destination / name)
     config = {'apiBaseUrl': api_url, 'hosted': True}
     (destination / 'config.js').write_text('window.BDL_CONFIG = Object.freeze(' + json.dumps(config) + ');\n')
     (destination / 'examples').mkdir()
     shutil.copyfile(ROOT / 'examples' / 'prices.csv', destination / 'examples' / 'prices.csv')
     (destination / '.nojekyll').touch()
+    (destination / 'obsidian-starter.zip').write_bytes(starter_zip())
     (destination / '.bdl-pages-build').write_text('public-assets-only\n')
 
 

@@ -1,0 +1,9 @@
+{
+  "id": "bdltradingbot",
+  "name": "BDLTradingBot",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Journal et notes de stratégie du bot Bitpanda. Code d'accès conservé seulement en mémoire.",
+  "author": "BDLTradingBot",
+  "isDesktopOnly": false
+}

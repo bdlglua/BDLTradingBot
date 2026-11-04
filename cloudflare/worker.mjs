@@ -1,5 +1,6 @@
 // Backend Cloudflare Workers Free + D1. Aucun secret dans ce fichier.
 // API officielle : https://github.com/bitpanda-labs/bitpanda-public-api
+import {createAutomation} from './automation.mjs';
 const BASE = 'https://api.public.bitpanda.com';
 const SCALE = 10n ** 18n;
 const encoder = new TextEncoder();
@@ -100,10 +101,11 @@ export function createWorker(transport = fetch, now = Date.now) {
   }
   async function quote(env, data) {
     const {currency, limit} = policy(env);
-    exactFields(data, ['assetId', 'currencyId', 'side', 'notional']);
-    const payload = {assetId: uuid(data.assetId), currencyId: uuid(data.currencyId), side: data.side, notional: data.notional};
-    const requested = decimal(payload.notional);
-    if (!['BUY', 'SELL'].includes(payload.side) || payload.currencyId !== currency || requested > limit) throw new Failure('Sens invalide, devise non autorisée ou plafond dépassé.');
+    const field=data&&Object.hasOwn(data,'quantity')?'quantity':'notional';
+    exactFields(data, ['assetId', 'currencyId', 'side', field]);
+    const payload = {assetId: uuid(data.assetId), currencyId: uuid(data.currencyId), side: data.side, [field]: data[field]};
+    const requested = decimal(payload[field]);
+    if (!['BUY', 'SELL'].includes(payload.side) || payload.currencyId !== currency || (field==='quantity'&&payload.side!=='SELL') || (field==='notional'&&requested > limit)) throw new Failure('Sens invalide, devise non autorisée ou plafond dépassé.');
     if (!env.BITPANDA_API_KEY) throw new Failure('Clé Bitpanda absente.', 503);
     const db = database(env), owner = crypto.randomUUID(), timestamp = now();
     const claim = await db.prepare("UPDATE gate SET owner=?,phase='requesting',release_at=0 WHERE id=1 AND (phase='idle' OR (phase='pending' AND release_at<=?))").bind(owner, timestamp).run();
@@ -112,7 +114,7 @@ export function createWorker(transport = fetch, now = Date.now) {
       const raw = await upstream(env, 'POST', '/rfq/quotes', payload);
       if (!raw || typeof raw !== 'object') throw new Failure('Devis Bitpanda invalide.', 502);
       const id = uuid(raw.id), assetId = uuid(raw.assetId), currencyId = uuid(raw.currencyId);
-      if (assetId !== payload.assetId || currencyId !== payload.currencyId || raw.side !== payload.side || decimal(raw.notional) !== requested || decimal(raw.notional) > limit) throw new Failure('Le devis ne correspond pas à la demande.', 502);
+      if (assetId !== payload.assetId || currencyId !== payload.currencyId || raw.side !== payload.side || decimal(raw[field]) !== requested || decimal(raw.notional) > limit) throw new Failure('Le devis ne correspond pas à la demande.', 502);
       decimal(raw.price); decimal(raw.quantity);
       const expiry = expires(raw.expiresAt);
       if (expiry <= now()) throw new Failure('Devis déjà expiré.', 409);
@@ -162,7 +164,9 @@ export function createWorker(transport = fetch, now = Date.now) {
     ]);
     return {quote_id: id, state: 'executed', message: 'Bitpanda a confirmé l’exécution de l’ordre réel.'};
   }
+  const automation=createAutomation({Failure,database,uuid,decimal,policy,quote,accept,upstream,now});
   return {
+    async scheduled(event,env) {return automation.tick(env,event.scheduledTime??now());},
     async fetch(request, env) {
       const url = new URL(request.url), incomingOrigin = request.headers.get('Origin');
       let allowedOrigin = '';
@@ -180,15 +184,21 @@ export function createWorker(transport = fetch, now = Date.now) {
           if (incomingOrigin !== allowedOrigin || !['GET', 'POST'].includes(request.headers.get('Access-Control-Request-Method')) || requestedHeaders.some(name => !['authorization', 'content-type', 'x-csrf-token'].includes(name))) throw new Failure('Prérequête refusée.', 403);
           return new Response(null, {status: 204, headers: {'Access-Control-Allow-Origin': allowedOrigin, 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-CSRF-Token', 'Access-Control-Max-Age': '600', Vary: 'Origin'}});
         }
-        if (!await equal(request.headers.get('Authorization'), 'Bearer ' + env.DASHBOARD_ACCESS_TOKEN)) throw new Failure('Code d’accès au serveur requis ou incorrect.', 401);
-        if (request.method === 'GET' && url.pathname === '/api/session') return reply(200, {csrf_token: await csrf(env.DASHBOARD_ACCESS_TOKEN)});
+        const dashboard=await equal(request.headers.get('Authorization'),'Bearer '+env.DASHBOARD_ACCESS_TOKEN);
+        const notesOnly=!dashboard&&/^[\x21-\x7e]{32,256}$/.test(env.OBSIDIAN_ACCESS_TOKEN||'')&&await equal(request.headers.get('Authorization'),'Bearer '+env.OBSIDIAN_ACCESS_TOKEN);
+        if(!dashboard&&!notesOnly)throw new Failure('Code d’accès au serveur requis ou incorrect.',401);
+        if(notesOnly&&!['/api/session','/api/obsidian/snapshot','/api/obsidian/notes'].includes(url.pathname))throw new Failure('Ce code est réservé à la synchronisation Obsidian.',403);
+        const sessionSecret=dashboard?env.DASHBOARD_ACCESS_TOKEN:env.OBSIDIAN_ACCESS_TOKEN;
+        if (request.method === 'GET' && url.pathname === '/api/session') return reply(200, {csrf_token: await csrf(sessionSecret)});
         if (request.method === 'GET' && url.pathname === '/api/bitpanda/status') {
           let enabled = false, reason = '';
           try { policy(env); enabled = Boolean(env.BITPANDA_API_KEY && env.DB); } catch (error) { reason = error.message; }
           if (!env.DB) reason = 'Base D1 persistante non connectée.';
           else if (!env.BITPANDA_API_KEY) reason = 'Clé Bitpanda absente.';
-          return reply(200, {broker: 'Bitpanda', api_key_present: Boolean(env.BITPANDA_API_KEY), trading_enabled: enabled, currency_id: enabled ? env.BITPANDA_TRADING_CURRENCY_ID : null, max_order_amount: enabled ? env.BITPANDA_MAX_ORDER_AMOUNT : null, reason, connection_verified: false, features: {backtest: false}});
+          return reply(200, {broker: 'Bitpanda', api_key_present: Boolean(env.BITPANDA_API_KEY), trading_enabled: enabled, currency_id: enabled ? env.BITPANDA_TRADING_CURRENCY_ID : null, max_order_amount: enabled ? env.BITPANDA_MAX_ORDER_AMOUNT : null, reason, connection_verified: false, features: {backtest: false,automation:true,obsidian:true}});
         }
+        if(request.method==='GET'&&url.pathname==='/api/automation/state')return reply(200,await automation.state(env));
+        if(request.method==='GET'&&url.pathname==='/api/obsidian/snapshot')return reply(200,await automation.snapshot(env));
         if (request.method === 'GET' && url.pathname === '/api/bitpanda/journal') {
           const result = await database(env).prepare('SELECT id,quote,state,expires,created FROM orders ORDER BY created DESC LIMIT 100').all();
           return reply(200, {orders: result.results.map(row => ({id: row.id, quote: JSON.parse(row.quote), state: row.state === 'pending' && row.expires <= now() ? 'expired' : row.state, created: row.created}))});
@@ -208,6 +218,15 @@ export function createWorker(transport = fetch, now = Date.now) {
           if (!await equal(request.headers.get('X-CSRF-Token'), await csrf(env.DASHBOARD_ACCESS_TOKEN))) throw new Failure('Session invalide. Reconnectez le serveur.', 403);
           const data = await jsonBody(request);
           return reply(200, url.pathname.endsWith('/quote') ? await quote(env, data) : await accept(env, data));
+        }
+        const actions={'/api/automation/config':automation.save,'/api/automation/approve':automation.approve,
+          '/api/automation/pause':automation.pause,'/api/automation/enable':automation.enable,
+          '/api/automation/research':automation.research,'/api/obsidian/notes':automation.notes};
+        if(request.method==='POST'&&actions[url.pathname]) {
+          if(!await equal(request.headers.get('X-CSRF-Token'),await csrf(sessionSecret)))throw new Failure('Session invalide. Reconnectez le serveur.',403);
+          const data=await jsonBody(request);
+          if(['/api/automation/pause','/api/automation/research'].includes(url.pathname))exactFields(data,[]);
+          return reply(200,await actions[url.pathname](env,data));
         }
         throw new Failure('Route introuvable.', 404);
       } catch (error) {

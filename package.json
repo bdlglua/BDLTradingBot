@@ -8,7 +8,7 @@
   },
   "scripts": {
     "check:worker": "wrangler deploy --dry-run --outdir .wrangler/check",
-    "test:worker": "node cloudflare/tests/worker.test.mjs"
+    "test:worker": "node cloudflare/tests/worker.test.mjs && node cloudflare/tests/obsidian-plugin.test.mjs"
   },
   "devDependencies": {
     "wrangler": "4.156.2"
