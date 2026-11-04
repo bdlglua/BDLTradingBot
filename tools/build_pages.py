@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_FILES = ('index.html', 'style.css', 'app.js', 'config.js', 'examples/prices.csv', '.nojekyll')
+PUBLIC_FILES = ('index.html', 'style.css', 'app.js', 'config.js', 'favicon.svg', 'examples/prices.csv', '.nojekyll')
 
 
 def build(destination, api_url=''):
@@ -25,7 +25,7 @@ def build(destination, api_url=''):
             raise ValueError('Le dossier de sortie contient des fichiers étrangers : construction interrompue.')
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
-    for name in ('index.html', 'style.css', 'app.js'):
+    for name in ('index.html', 'style.css', 'app.js', 'favicon.svg'):
         shutil.copyfile(ROOT / 'static' / name, destination / name)
     config = {'apiBaseUrl': api_url, 'hosted': True}
     (destination / 'config.js').write_text('window.BDL_CONFIG = Object.freeze(' + json.dumps(config) + ');\n')

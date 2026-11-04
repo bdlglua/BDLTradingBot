@@ -51,6 +51,28 @@ class WebTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 400)
             self.assertIn('error', json.load(error.exception))
 
+    def test_static_paths_ignore_query_string(self):
+        for path in ('/?v=2', '/app.js?v=2', '/favicon.svg', '/examples/prices.csv'):
+            with urlopen(self.base + path, timeout=5) as response:
+                self.assertEqual(response.status, 200)
+
+    def test_ticker_and_asset_lookup_validate_uuid(self):
+        from unittest.mock import Mock, patch
+        client = Mock(key='test-only')
+        client.ticker.return_value = {'price': '1'}
+        client.read.return_value = {'data': []}
+        service = Mock(client=client)
+        asset = '11111111-1111-4111-8111-111111111111'
+        with patch.object(Handler, 'broker', service):
+            with urlopen(self.base + '/api/bitpanda/ticker?assetId=' + asset, timeout=5) as response:
+                self.assertEqual(json.load(response)['result'], {'price': '1'})
+            with urlopen(self.base + '/api/bitpanda/assets?id=' + asset.upper(), timeout=5) as response:
+                client.read.assert_called_with('assets', {'id': asset, 'pageSize': 50})
+            for path in ('/api/bitpanda/assets?id=nope', '/api/bitpanda/ticker?foo=1', '/api/bitpanda/journal?x=1'):
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(self.base + path, timeout=5)
+                self.assertEqual(error.exception.code, 400)
+
     def test_no_file_traversal(self):
         with self.assertRaises(HTTPError) as error:
             urlopen(self.base + '/bot.py', timeout=5)

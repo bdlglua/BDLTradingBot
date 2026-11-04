@@ -10,7 +10,17 @@ Le connecteur est implémenté à partir de la [documentation publique Bitpanda]
 
 ### Interface web
 
-Lancez `python3 web.py` depuis le dossier du dépôt, puis ouvrez le port local 8000 dans votre navigateur. L'écran d'accueil présente votre espace Bitpanda. Le bouton « Laboratoire » ouvre le backtest CSV séparé.
+Lancez `python3 web.py` depuis le dossier du dépôt, puis ouvrez le port local 8000 dans votre navigateur. L'interface comporte cinq écrans, accessibles par la barre latérale (ou la barre du bas sur mobile) :
+
+| Écran | Contenu |
+| --- | --- |
+| **Portefeuille** | Valeur totale, nombre de positions, état du trading et plafond ; positions avec symbole, quantité, valeur et répartition. |
+| **Trader** | Achat/vente, recherche d'actif, prix indicatif (`/assets/{id}/ticker`), montant en devise, devis avec compte à rebours puis confirmation explicite. |
+| **Historique** | Journal des ordres de l'application avec rapprochement, et opérations Bitpanda paginées. |
+| **Laboratoire** | Backtest CSV (glisser-déposer), graphique interactif avec achats/ventes, export JSON. |
+| **Connexion** | Adresse du serveur, code d'accès et liste de contrôle de la configuration. |
+
+Le thème clair ou sombre suit celui de votre système.
 
 Par défaut le serveur reste local : écoute sur `127.0.0.1` ou `localhost`, contrôle de Host/Origin et jeton anti-CSRF pour les ordres. Le mode hébergé doit être configuré selon DEPLOYMENT.md, avec HTTPS et code d'accès privé ; il reste destiné à un seul propriétaire de compte. Les fichiers CSV sont traités temporairement puis supprimés (2 Mo et 20 000 observations maximum).
 
@@ -27,7 +37,7 @@ Dans les paramètres sécurisés de l'environnement, ajoutez la clé créée dan
 
 Autorisez la destination HTTPS `api.public.bitpanda.com` dans le réseau de l'environnement. Le connecteur conserve le proxy et la vérification TLS ; il refuse les redirections pour ne pas divulguer la clé. L'enregistrement d'un brouillon de configuration n'applique pas à lui seul les variables ou le réseau à la machine : enregistrez les paramètres puis redémarrez le serveur avec les nouvelles variables injectées.
 
-Commencez avec le trading désactivé, cliquez sur « Actualiser le compte » et vérifiez que votre portefeuille réel s'affiche. Configurez votre devise et votre plafond puis activez le trading si vous souhaitez utiliser les ordres. Recherchez un symbole, sélectionnez l'actif exact et la devise, choisissez achat ou vente, puis saisissez un montant **en devise**. L'API accepte ce montant (`notional`) pour les deux sens ; les quantités sont fournies par le devis.
+Commencez avec le trading désactivé : le compte est lu automatiquement à la connexion (bouton « Actualiser » ensuite) ; vérifiez que votre portefeuille réel s'affiche. Configurez votre devise et votre plafond puis activez le trading si vous souhaitez utiliser les ordres. Dans « Trader », choisissez achat ou vente, recherchez un symbole, sélectionnez l'actif exact et la devise, puis saisissez un montant **en devise** (virgule ou point décimal acceptés). L'API accepte ce montant (`notional`) pour les deux sens ; les quantités sont fournies par le devis.
 
 « Obtenir un devis » appelle `POST /rfq/quotes` sans exécution. Vérifiez l'actif, la devise, le sens, le montant, le prix, la quantité et l'expiration. Cochez la confirmation puis cliquez sur « Exécuter l'ordre réel » : ce bouton appelle `POST /rfq/quotes/{id}/accept` et peut engager votre argent. Les devis expirés sont refusés. Le plafond porte sur le montant `notional` du devis ; ne supposez pas qu'il couvre des coûts supplémentaires non décrits par la réponse API.
 
@@ -37,7 +47,7 @@ Les types d'actifs disponibles dépendent du compte et de l'API : l'application 
 
 Le journal SQLite privé `.state/bitpanda.sqlite3` (ou le fichier `bitpanda.sqlite3` sous `BITPANDA_STATE_DIR` si défini) conserve les devis et états, jamais la clé API. Il est ignoré par Git mais doit être préservé entre redémarrages : le supprimer détruit la protection contre le renvoi d'un même devis. Il contient des informations financières ; gardez-le privé. Un redémarrage ne reprend pas automatiquement un devis à confirmer : laissez-le expirer avant d'en demander un autre.
 
-Une acceptation est enregistrée comme envoyée **avant** l'appel distant. Elle n'est jamais renvoyée automatiquement, même après timeout ou redémarrage. Un résultat ambigu devient `unknown` (ou reste `submitted` si le processus s'interrompt) et bloque les nouvelles demandes. Consultez les opérations réelles de Bitpanda et faites rapprocher ce devis avant toute reprise. La levée de ce blocage après rapprochement n'est pas encore proposée dans l'interface ; ne supprimez pas le journal pour le contourner.
+Une acceptation est enregistrée comme envoyée **avant** l'appel distant. Elle n'est jamais renvoyée automatiquement, même après timeout ou redémarrage. Un résultat ambigu devient `unknown` (ou reste `submitted` si le processus s'interrompt) et bloque les nouvelles demandes. Consultez les opérations réelles de Bitpanda, puis cliquez sur « Rapprocher » dans l'Historique et indiquez ce que vous constatez (exécuté ou non exécuté). Le rapprochement n'envoie **aucune** requête à Bitpanda : il met seulement le journal à jour et lève le blocage. Il n'est accepté que 30 secondes après l'expiration du devis, quand celui-ci ne peut plus être exécuté. Ne supprimez jamais le journal pour contourner ce blocage.
 
 Il n'y a pas encore de trading autonome, de stop réel, de boucle de stratégie sur données de marché ni de surveillance continue. Les paramètres de moyennes mobiles, allocation et stop du laboratoire n'agissent **pas** sur les ordres Bitpanda.
 
@@ -51,9 +61,9 @@ mkdir -p reports
 python3 bot.py examples/prices.csv --fast 2 --slow 3 --output reports/backtest.json
 ```
 
-Les tests du connecteur et du serveur sont hors ligne et n'exécutent aucun ordre financier. Test navigateur facultatif : `python3 tests/browser_smoke.py` (Playwright et Chromium requis). Ce test intercepte les routes de trading et couvre la confirmation avec des réponses fictives. L'application n'a pas besoin de ces outils pour fonctionner.
+Les tests du connecteur et du serveur sont hors ligne et n'exécutent aucun ordre financier. Tests navigateur facultatifs : `python3 tests/browser_smoke.py` et `python3 tests/browser_pages.py` (Playwright pour Python et Chromium requis ; `CHROMIUM_PATH` peut indiquer le binaire). Ils interceptent toutes les routes Bitpanda et couvrent portefeuille, devis, confirmation, rapprochement et affichage mobile avec des réponses fictives. L'application n'a pas besoin de ces outils pour fonctionner.
 
-Le jeu fourni est synthétique et sert uniquement à vérifier le fonctionnement. Pour vos données, utilisez un CSV avec les colonnes `timestamp,close`, des dates ISO 8601 avec fuseau horaire, strictement croissantes, et des prix positifs. Conservez une fréquence régulière et une seule paire par fichier.
+Le jeu fourni est synthétique et sert uniquement à vérifier le fonctionnement. Pour vos données, utilisez un CSV avec les colonnes `timestamp,close`, des dates ISO 8601 avec fuseau horaire, strictement croissantes, et des prix positifs. Les exports Excel français (séparateur `;`, virgule décimale, BOM UTF-8) sont acceptés. Conservez une fréquence régulière et une seule paire par fichier.
 
 ## Stratégie et risque
 

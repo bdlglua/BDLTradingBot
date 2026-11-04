@@ -13,6 +13,9 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
 BASE_URL = 'https://api.public.bitpanda.com'
+# Délai après l'expiration d'un devis avant de permettre son rapprochement :
+# supérieur au timeout réseau, pour qu'aucune acceptation ne soit encore en vol.
+RECONCILE_MARGIN_SECONDS = 30
 
 
 class BrokerError(Exception):
@@ -50,6 +53,34 @@ def instant(value):
         raise BrokerError('Date d’expiration du devis invalide.', 502) from None
 
 
+def upstream_detail(raw):
+    """Message d'erreur court renvoyé par Bitpanda, sans jamais le réinterpréter."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return ''
+    candidates = []
+    if isinstance(data, dict):
+        for key in ('message', 'error', 'detail', 'title', 'errors'):
+            candidates.append(data.get(key))
+    for value in candidates:
+        if isinstance(value, list) and value:
+            value = value[0]
+        if isinstance(value, dict):
+            value = value.get('message') or value.get('detail') or value.get('code')
+        if isinstance(value, str) and value.strip():
+            text = ''.join(char if char.isprintable() else ' ' for char in value)
+            return ' '.join(text.split())[:200]
+    return ''
+
+
+def is_expired(quote, margin=0):
+    try:
+        return instant(quote['expiresAt']) + margin <= datetime.now(timezone.utc).timestamp()
+    except (BrokerError, KeyError, TypeError):
+        return True
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward the API key to another destination.
@@ -81,10 +112,17 @@ class BitpandaClient:
                 return json.loads(raw) if raw else {}
         except HTTPError as error:
             code = error.code
-            error.close()
+            try:
+                detail = upstream_detail(error.read(4096))
+            except OSError:
+                detail = ''
+            finally:
+                error.close()
             messages = {401: 'Clé Bitpanda refusée.', 403: 'Accès refusé par Bitpanda ou le proxy réseau.',
+                        404: 'Ressource introuvable sur Bitpanda.',
                         429: 'Limite de requêtes Bitpanda atteinte. Attendez avant de réessayer.'}
-            raise BrokerError(messages.get(code, f'Bitpanda a retourné HTTP {code}.'), 502) from None
+            message = messages.get(code, f'Bitpanda a refusé la requête (HTTP {code}).')
+            raise BrokerError(message + (f' Détail : {detail}' if detail else ''), 502) from None
         except (URLError, OSError, ValueError):
             raise BrokerError('Réponse Bitpanda indisponible ou illisible. Aucun renvoi automatique.', 502) from None
 
@@ -94,6 +132,9 @@ class BitpandaClient:
         if resource not in paths:
             raise BrokerError('Ressource inconnue.', 404)
         return self.request('GET', paths[resource], query=query)
+
+    def ticker(self, asset_id):
+        return self.request('GET', f'/assets/{identifier(asset_id)}/ticker')
 
 
 class TradingService:
@@ -122,7 +163,7 @@ class TradingService:
                     trading_enabled=enabled and bool(self.client.key),
                     currency_id=currency, max_order_amount=str(limit) if limit else None,
                     reason=reason or ('' if self.client.key else 'Clé API absente.'),
-                    connection_verified=False)
+                    connection_verified=False, features=dict(backtest=True, reconcile=True))
 
     def connect_db(self):
         self.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -141,7 +182,13 @@ class TradingService:
         connection = self.connect_db()
         try:
             rows = connection.execute('SELECT id, quote, state, created FROM orders ORDER BY rowid DESC LIMIT 100').fetchall()
-            return [dict(id=row['id'], quote=json.loads(row['quote']), state=row['state'], created=row['created']) for row in rows]
+            orders = []
+            for row in rows:
+                quote = json.loads(row['quote'])
+                # A pending quote past its expiry can no longer be accepted.
+                state = 'expired' if row['state'] == 'pending' and is_expired(quote) else row['state']
+                orders.append(dict(id=row['id'], quote=quote, state=state, created=row['created']))
+            return orders
         finally:
             connection.close()
 
@@ -168,6 +215,8 @@ class TradingService:
                     raise BrokerError('Devis Bitpanda invalide.', 502)
                 try:
                     quote_id = identifier(quote['id'])
+                    # UUIDs are compared in canonical form: Bitpanda may change their case.
+                    quote['assetId'], quote['currencyId'] = identifier(quote['assetId']), identifier(quote['currencyId'])
                     if any(quote.get(k) != request[k] for k in ('assetId', 'currencyId', 'side')):
                         raise BrokerError('Le devis ne correspond pas à la demande.', 502)
                     if amount(quote.get('notional')) != requested or amount(quote.get('notional')) > limit:
@@ -177,11 +226,16 @@ class TradingService:
                         raise BrokerError('Le devis est déjà expiré. Demandez-en un nouveau.', 409)
                 except KeyError:
                     raise BrokerError('Devis Bitpanda incomplet.', 502) from None
+                except BrokerError as error:
+                    raise BrokerError(str(error), 502 if error.status == 400 else error.status) from None
                 token = secrets.token_urlsafe(32)
                 # Retain only the documented quote fields, never arbitrary upstream text.
                 quote = {key: quote[key] for key in ('id', 'assetId', 'currencyId', 'side', 'price', 'quantity', 'notional', 'expiresAt')}
-                connection.execute('INSERT INTO orders VALUES (?, ?, ?, ?, ?)',
-                                   (quote_id, json.dumps(quote), token, 'pending', datetime.now(timezone.utc).isoformat()))
+                try:
+                    connection.execute('INSERT INTO orders VALUES (?, ?, ?, ?, ?)',
+                                       (quote_id, json.dumps(quote), token, 'pending', datetime.now(timezone.utc).isoformat()))
+                except sqlite3.IntegrityError:
+                    raise BrokerError('Bitpanda a renvoyé un devis déjà présent dans le journal. Aucun ordre envoyé.', 502) from None
                 connection.commit()
                 return dict(quote=quote, confirmation_token=token)
             finally:
@@ -214,10 +268,46 @@ class TradingService:
                 connection.commit()
                 try:
                     self.client.request('POST', f'/rfq/quotes/{quote_id}/accept')
-                except Exception:
+                except Exception as failure:
                     connection.execute("UPDATE orders SET state='unknown' WHERE id=?", (quote_id,))
-                    raise BrokerError('Résultat de l’ordre inconnu. Ne le renvoyez pas : vérifiez les opérations sur Bitpanda. Les nouveaux ordres sont bloqués.', 502) from None
+                    cause = f' ({failure})' if isinstance(failure, BrokerError) else ''
+                    raise BrokerError(f'Résultat de l’ordre inconnu{cause}. Ne le renvoyez pas : vérifiez les opérations sur Bitpanda '
+                                      'puis rapprochez l’ordre dans le journal. Les nouveaux ordres sont bloqués d’ici là.', 502) from None
                 connection.execute("UPDATE orders SET state='executed' WHERE id=?", (quote_id,))
                 return dict(quote_id=quote_id, state='executed', message='Bitpanda a confirmé l’exécution de l’ordre réel.')
+            finally:
+                connection.close()
+
+    def reconcile(self, data):
+        """Clôt un ordre `submitted`/`unknown` après vérification manuelle sur Bitpanda.
+
+        Aucun appel financier : on enregistre seulement ce que l'utilisateur a constaté
+        dans son historique, une fois le devis expiré depuis assez longtemps pour ne
+        plus pouvoir être exécuté.
+        """
+        if (not isinstance(data, dict) or set(data) != {'quote_id', 'outcome', 'confirm_checked_bitpanda'}
+                or data['confirm_checked_bitpanda'] is not True):
+            raise BrokerError('Confirmez avoir vérifié l’historique de vos opérations Bitpanda.')
+        if data['outcome'] not in ('executed', 'not_executed'):
+            raise BrokerError('Résultat constaté invalide.')
+        quote_id = identifier(data['quote_id'])
+        with self.lock:
+            connection = self.connect_db()
+            try:
+                connection.execute('BEGIN IMMEDIATE')
+                row = connection.execute('SELECT quote, state FROM orders WHERE id=?', (quote_id,)).fetchone()
+                if row is None:
+                    raise BrokerError('Devis introuvable dans le journal.', 404)
+                if row['state'] not in ('submitted', 'unknown'):
+                    raise BrokerError('Ce devis n’est pas en attente de rapprochement.', 409)
+                quote = json.loads(row['quote'])
+                if not is_expired(quote, RECONCILE_MARGIN_SECONDS):
+                    raise BrokerError(f'Attendez {RECONCILE_MARGIN_SECONDS} s après l’expiration du devis avant de le rapprocher.', 409)
+                quote['reconciled'] = data['outcome']
+                quote['reconciledAt'] = datetime.now(timezone.utc).isoformat()
+                state = 'executed' if data['outcome'] == 'executed' else 'expired'
+                connection.execute('UPDATE orders SET state=?, quote=? WHERE id=?', (state, json.dumps(quote), quote_id))
+                connection.commit()
+                return dict(quote_id=quote_id, state=state, message='Ordre rapproché. Les nouveaux devis sont de nouveau possibles.')
             finally:
                 connection.close()
