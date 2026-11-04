@@ -20,6 +20,7 @@ Le dépôt contient `wrangler.jsonc`, qui indique le point d'entrée `cloudflare
 - Commande de build : aucune.
 - Commande de déploiement : `npx wrangler deploy`.
 - Branche de production : `main`.
+- Branches autres que `main` : Cloudflare exécute `npx wrangler preview`, qui utilise le bloc `previews` de `wrangler.jsonc`. Une Preview ne reçoit ni les secrets de production ni la base D1 : elle ne peut pas accéder au compte Bitpanda.
 
 Le nom du Worker dans Cloudflare doit correspondre au champ `name` de `wrangler.jsonc`. S'il est différent, adaptez ce champ au nom réel. Les secrets Bitpanda se règlent dans les paramètres **du Worker**, pas dans les paramètres de build.
 
