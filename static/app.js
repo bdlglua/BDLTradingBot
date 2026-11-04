@@ -49,8 +49,46 @@ function emptyRow(tbody, columns, message) {
 }
 function rows(result) {
   if (Array.isArray(result)) return result;
-  if (result && Array.isArray(result.data)) return result.data;
-  throw Error('Format de réponse Bitpanda non reconnu.');
+  for (const key of ['data', 'items', 'results']) if (result && Array.isArray(result[key])) return result[key];
+  // Only key names are shown, never values, so the message can be shared safely.
+  const keys = result && typeof result === 'object' ? Object.keys(result).slice(0, 12).join(', ') : typeof result;
+  throw Error(`Format de réponse Bitpanda non reconnu (clés reçues : ${keys || 'aucune'}).`);
+}
+/* Bitpanda documents both snake_case and camelCase fields, and monetary values either
+   as plain decimals or as {value, asset_id, currency_id} objects: map them to one shape. */
+function first(object, ...names) {
+  if (!object || typeof object !== 'object') return undefined;
+  for (const name of names) if (object[name] !== undefined && object[name] !== null) return object[name];
+  return undefined;
+}
+const amountOf = value => value && typeof value === 'object' ? first(value, 'value', 'amount') : value;
+const unwrap = result => result && typeof result === 'object' && !Array.isArray(result) && result.data && typeof result.data === 'object' && !Array.isArray(result.data) ? result.data : result;
+function nextCursor(result) {
+  const cursor = first(result, 'next_cursor', 'nextCursor', 'cursor');
+  return typeof cursor === 'string' && cursor && first(result, 'has_next_page', 'hasNextPage') !== false ? cursor : null;
+}
+const normalizeAsset = asset => ({id: first(asset, 'id', 'asset_id', 'assetId'), symbol: first(asset, 'symbol', 'ticker'),
+  name: first(asset, 'name'), type: first(asset, 'type', 'asset_type', 'assetType', 'group', 'asset_group'), isin: first(asset, 'isin')});
+function normalizeHolding(item) {
+  const balance = first(item, 'balance', 'quantity', 'amount', 'available_balance', 'availableBalance');
+  const fiat = first(item, 'currency_balance', 'currencyBalance', 'value', 'fiat_value', 'fiatValue');
+  return {
+    assetId: first(item, 'asset_id', 'assetId') ?? first(balance, 'asset_id', 'assetId'),
+    quantity: amountOf(balance), value: amountOf(fiat),
+    currencyId: first(fiat, 'currency_id', 'currencyId') ?? first(item, 'currency_id', 'currencyId', 'equivalentCurrencyId', 'equivalent_currency_id'),
+    totalReturn: amountOf(first(item, 'total_return', 'totalReturn')),
+  };
+}
+const normalizeCurrency = currency => ({id: first(currency, 'id', 'currency_id', 'currencyId'),
+  code: first(currency, 'symbol', 'code', 'iso_code', 'isoCode', 'name')});
+function normalizeOperation(operation) {
+  const amount = first(operation, 'amount', 'quantity', 'asset_amount', 'assetAmount');
+  return {
+    timestamp: first(operation, 'timestamp', 'time', 'created_at', 'createdAt', 'executed_at', 'executedAt', 'date'),
+    type: first(operation, 'type', 'operation_type', 'operationType', 'category'),
+    assetId: first(operation, 'asset_id', 'assetId') ?? first(amount, 'asset_id', 'assetId'),
+    amount: amountOf(amount),
+  };
 }
 const normalizeId = value => typeof value === 'string' ? value.toLowerCase() : '';
 const assetLabel = id => state.assets.get(normalizeId(id))?.symbol || '';
@@ -148,13 +186,13 @@ async function loadStatus() { state.status = await api('/api/bitpanda/status'); 
 /* --------------------------------------------------------------- portfolio */
 function renderHoldings() {
   const tbody = $('holdings'); tbody.replaceChildren();
-  const positions = state.holdings.filter(item => Number(item.quantity) !== 0 || Number(item.value) !== 0)
+  const positions = state.holdings.map(normalizeHolding).filter(item => item.assetId && (Number(item.quantity) !== 0 || Number(item.value) !== 0))
     .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0));
   const total = positions.reduce((sum, item) => sum + (Number(item.value) || 0), 0);
-  const code = currencyCode(positions[0]?.equivalentCurrencyId) || (positions.length ? 'EUR' : '');
+  const code = currencyCode(positions[0]?.currencyId) || (positions.length ? 'EUR' : '');
   $('kpi-value').textContent = state.accountRead ? money(total, code) : '—';
   $('kpi-positions').textContent = state.accountRead ? String(positions.length) : '—';
-  if (!positions.length) { emptyRow(tbody, 4, state.accountRead ? 'Aucune position sur ce compte.' : 'Aucune donnée pour le moment.'); return; }
+  if (!positions.length) { emptyRow(tbody, 5, state.accountRead ? 'Aucune position sur ce compte.' : 'Aucune donnée pour le moment.'); return; }
   for (const item of positions) {
     const symbol = assetLabel(item.assetId), share = total > 0 ? (Number(item.value) || 0) / total : 0;
     const row = tbody.insertRow();
@@ -163,7 +201,11 @@ function renderHoldings() {
       element('div', {}, [element('strong', {text: symbol || 'Actif'}), element('small', {text: item.assetId, title: item.assetId})]),
     ]));
     row.insertCell().textContent = formatAmount(item.quantity); row.cells[1].className = 'num';
-    const value = row.insertCell(); value.className = 'num'; value.textContent = money(item.value, currencyCode(item.equivalentCurrencyId) || code);
+    const valueCode = currencyCode(item.currencyId) || code;
+    const value = row.insertCell(); value.className = 'num'; value.textContent = item.value !== undefined ? money(item.value, valueCode) : '—';
+    const gain = row.insertCell(), result = Number(item.totalReturn);
+    gain.className = 'num ' + (result > 0 ? 'positive' : result < 0 ? 'negative' : '');
+    gain.textContent = Number.isFinite(result) && item.totalReturn !== undefined ? `${result > 0 ? '+' : ''}${money(result, valueCode)}` : '—';
     const bar = element('span', {className: 'bar'}, element('span')); bar.firstChild.style.width = `${Math.round(share * 1000) / 10}%`;
     const shareCell = row.insertCell(); shareCell.className = 'share-cell';
     shareCell.append(element('div', {className: 'share'}, [bar, element('b', {text: `${formatNumber(share * 100, 1)} %`})]));
@@ -173,7 +215,7 @@ async function resolveAssets(ids) {
   const missing = [...new Set(ids.map(normalizeId))].filter(id => id && !state.assets.has(id)).slice(0, 25);
   for (const id of missing) {
     try {
-      const asset = rows((await api('/api/bitpanda/assets?id=' + encodeURIComponent(id))).result).find(item => normalizeId(item.id) === id);
+      const asset = rows((await api('/api/bitpanda/assets?id=' + encodeURIComponent(id))).result).map(normalizeAsset).find(item => normalizeId(item.id) === id);
       state.assets.set(id, asset || {id, symbol: ''});
     } catch { state.assets.set(id, {id, symbol: ''}); }
   }
@@ -188,7 +230,7 @@ async function refreshAccount() {
     try {
       const currencies = rows((await api('/api/bitpanda/currencies')).result);
       state.currencies.clear();
-      for (const currency of currencies) if (currency?.id) state.currencies.set(normalizeId(currency.id), currency.symbol || currency.code || currency.name || 'Devise');
+      for (const currency of currencies.map(normalizeCurrency)) if (currency.id) state.currencies.set(normalizeId(currency.id), currency.code || 'Devise');
       renderCurrencies();
     } catch (error) { problems.push(`Devises : ${error.message}`); }
     try {
@@ -199,7 +241,7 @@ async function refreshAccount() {
     renderStatus(); renderHoldings();
     if (!state.accountRead) setCheck('account', 'error');
     await loadJournal();
-    resolveAssets([...state.holdings.map(item => item.assetId), ...state.orders.map(order => order.quote?.assetId)]);
+    resolveAssets([...state.holdings.map(item => normalizeHolding(item).assetId), ...state.orders.map(order => order.quote?.assetId)]);
   } catch (error) {
     problems.push(error.message);
     setCheck('account', 'error');
@@ -258,7 +300,7 @@ $('asset-search').addEventListener('submit', async event => {
   const list = $('asset-results');
   try {
     const result = (await api('/api/bitpanda/assets?symbol=' + encodeURIComponent(symbol))).result;
-    const assets = rows(result).filter(asset => asset?.id);
+    const assets = rows(result).map(normalizeAsset).filter(asset => asset.id);
     list.replaceChildren();
     for (const asset of assets) {
       state.assets.set(normalizeId(asset.id), asset);
@@ -270,7 +312,7 @@ $('asset-search').addEventListener('submit', async event => {
       list.append(option);
     }
     if (!assets.length) list.append(element('p', {className: 'muted', text: 'Aucun actif trouvé pour ce symbole sur votre compte.'}));
-    if (result?.cursor) list.append(element('p', {className: 'muted', text: 'D’autres résultats existent : précisez le symbole.'}));
+    if (nextCursor(result)) list.append(element('p', {className: 'muted', text: 'D’autres résultats existent : précisez le symbole.'}));
     list.hidden = false;
     if (assets.length === 1) selectAsset(assets[0]);
   } catch (error) { showError(error.message); }
@@ -284,9 +326,11 @@ async function selectAsset(asset) {
   $('asset-price').textContent = 'Prix indicatif…';
   updateQuoteButton();
   try {
-    const ticker = (await api('/api/bitpanda/ticker?assetId=' + encodeURIComponent(asset.id))).result;
+    const ticker = unwrap((await api('/api/bitpanda/ticker?assetId=' + encodeURIComponent(asset.id))).result);
     if (state.asset !== asset) return;
-    $('asset-price').textContent = ticker?.price ? `Prix indicatif : ${formatAmount(ticker.price)} ${ticker.currency || ''}` : 'Prix indicatif indisponible';
+    const price = amountOf(first(ticker, 'price', 'last_price', 'lastPrice', 'value'));
+    const currency = first(ticker, 'currency', 'currency_code', 'currencyCode', 'quote_currency', 'quoteCurrency');
+    $('asset-price').textContent = price !== undefined ? `Prix indicatif : ${formatAmount(price)} ${typeof currency === 'string' ? currency : ''}` : 'Prix indicatif indisponible';
   } catch { if (state.asset === asset) $('asset-price').textContent = 'Prix indicatif indisponible'; }
 }
 $('asset-clear').addEventListener('click', () => {
@@ -440,9 +484,11 @@ async function loadOperations(more) {
   try {
     const query = more && state.opsCursor ? '?cursor=' + encodeURIComponent(state.opsCursor) : '';
     const result = (await api('/api/bitpanda/operations' + query)).result;
-    const page = rows(result);
+    const page = rows(result).map(normalizeOperation);
     state.operations = more ? state.operations.concat(page) : page;
-    state.opsCursor = typeof result?.cursor === 'string' && result.cursor ? result.cursor : null;
+    const cursor = nextCursor(result), previous = more ? state.opsCursor : null;
+    // Bitpanda has been seen returning the same cursor again: stop instead of looping.
+    state.opsCursor = cursor && cursor !== previous ? cursor : null;
     $('more-operations').hidden = !state.opsCursor;
     renderOperations(true);
     resolveAssets(page.map(item => item.assetId));
@@ -456,7 +502,7 @@ function renderOperations(loaded) {
   if (!state.operations.length) { emptyRow(tbody, 4, 'Aucune opération sur ce compte.'); return; }
   for (const operation of state.operations) {
     const row = tbody.insertRow();
-    row.insertCell().textContent = formatDate(operation.timestamp || operation.time || operation.createdAt);
+    row.insertCell().textContent = formatDate(operation.timestamp);
     row.insertCell().append(element('span', {className: 'tag', text: String(operation.type || '—').replaceAll('_', ' ').toLowerCase()}));
     row.insertCell().textContent = assetLabel(operation.assetId) || (operation.assetId ? operation.assetId.slice(0, 8) + '…' : '—');
     const amount = row.insertCell(); amount.className = 'num'; amount.textContent = operation.amount !== undefined ? formatAmount(operation.amount) : '—';
