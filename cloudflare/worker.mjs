@@ -104,16 +104,28 @@ export function createWorker(transport = fetch, now = Date.now) {
   async function upstream(env, method, path, body) {
     if (!env.BITPANDA_API_KEY) throw new Failure('Clé Bitpanda absente des secrets du serveur.', 503);
     const headers = {'x-api-key': env.BITPANDA_API_KEY, Accept: 'application/json'};
-    const options = {method, headers, redirect: 'error', signal: AbortSignal.timeout(15000)};
+    // Redirections are never followed (the key must not leave Bitpanda) but are reported.
+    const options = {method, headers, redirect: 'manual', signal: AbortSignal.timeout(15000)};
     if (body !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
+    const route = `${method} ${path.split('?')[0]}`;
     let response;
     try { response = await transport(BASE + path, options); }
-    catch { throw new Failure('Réponse Bitpanda indisponible. Aucun renvoi automatique.', 502); }
+    catch (error) {
+      const cause = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'délai de 15 s dépassé'
+        : `erreur réseau${typeof error?.message === 'string' && error.message ? ` : ${error.message.replace(/\s+/g, ' ').slice(0, 120)}` : ''}`;
+      throw new Failure(`Bitpanda injoignable (${route}, ${cause}). Aucun renvoi automatique.`, 502);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      let target = 'destination inconnue';
+      try { const location = new URL(response.headers.get('Location'), BASE); target = (location.origin + location.pathname).slice(0, 120); } catch { /* en-tête absent ou invalide */ }
+      throw new Failure(`Bitpanda a redirigé ${route} vers ${target} (HTTP ${response.status}). Redirection non suivie pour protéger la clé.`, 502);
+    }
     if (!response.ok) {
       let detail = '';
       try { detail = upstreamDetail(await readLimited(response.body, 4096)); } catch { /* corps illisible ou trop long */ }
       const known = {401: 'Clé Bitpanda refusée.', 403: 'Accès refusé par Bitpanda.', 404: 'Ressource introuvable sur Bitpanda.', 429: 'Limite de requêtes Bitpanda atteinte. Attendez avant de réessayer.'};
-      throw new Failure((known[response.status] || `Bitpanda a refusé la requête (HTTP ${response.status}).`) + (detail ? ` Détail : ${detail}` : ''), 502);
+      throw new Failure((known[response.status] || `Bitpanda a refusé la requête (HTTP ${response.status}).`) + ` [${route}]` + (detail ? ` Détail : ${detail}` : ''), 502);
     }
     try {
       const raw = await readLimited(response.body, 4000000);
