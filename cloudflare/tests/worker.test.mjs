@@ -178,3 +178,43 @@ test('base absente bloque le trading ; le laboratoire n’est pas inventé', asy
   assert.equal((await f.quote()).status, 503); assert.equal(f.state.calls.length, 0);
   assert.equal((await f.call('/api/backtest', {})).status, 501);
 });
+test('rapprochement manuel après vérification : aucun appel financier, verrou levé', async t => {
+  const f = fixture(t), quote = await f.quote(); f.state.failAccept = true;
+  assert.equal((await f.call('/api/bitpanda/accept', f.confirmation(quote))).status, 502);
+  const id = quote.body.quote.id, calls = f.state.calls.length;
+  const body = {quote_id: id, outcome: 'not_executed', confirm_checked_bitpanda: true};
+  assert.equal((await f.call('/api/bitpanda/reconcile', {...body, confirm_checked_bitpanda: false})).status, 400);
+  assert.equal((await f.call('/api/bitpanda/reconcile', body)).status, 409, 'devis pas encore expiré');
+  f.state.now += 60000 + 30001;
+  const done = await f.call('/api/bitpanda/reconcile', body);
+  assert.equal(done.status, 200); assert.equal(done.body.state, 'expired');
+  assert.equal((await f.call('/api/bitpanda/reconcile', body)).status, 409);
+  assert.equal(f.state.calls.length, calls);
+  const order = (await f.call('/api/bitpanda/journal')).body.orders[0];
+  assert.equal(order.quote.reconciled, 'not_executed');
+  assert.equal((await f.quote()).status, 200);
+  assert.equal(f.acceptCalls(), 1);
+});
+test('un devis interrompu en « requesting » libère le verrou après le délai', async t => {
+  const f = fixture(t);
+  f.db.sqlite.exec(`UPDATE gate SET owner='crashed', phase='requesting', release_at=${f.state.now + 120000}`);
+  assert.equal((await f.quote()).status, 409);
+  f.state.now += 120001;
+  assert.equal((await f.quote()).status, 200);
+});
+test('code d’accès manquant : erreur lisible par le site, aucune donnée', async t => {
+  const f = fixture(t); delete f.env.DASHBOARD_ACCESS_TOKEN;
+  const result = await f.call('/api/bitpanda/status', undefined, {Authorization: ''});
+  assert.equal(result.status, 503); assert.equal(result.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+  assert.match(result.body.error, /DASHBOARD_ACCESS_TOKEN/);
+});
+test('prix indicatif, recherche par UUID et détail d’erreur Bitpanda', async t => {
+  const f = fixture(t);
+  assert.equal((await f.call('/api/bitpanda/ticker?assetId=' + ASSET.toUpperCase())).status, 200);
+  assert.ok(f.state.calls.at(-1).url.endsWith(`/assets/${ASSET}/ticker`));
+  assert.equal((await f.call('/api/bitpanda/ticker?assetId=../x')).status, 400);
+  assert.equal((await f.call('/api/bitpanda/assets?id=' + ASSET)).status, 200);
+  assert.equal((await f.call('/api/bitpanda/assets?id=nope')).status, 400);
+  f.env.BITPANDA_TRADING_CURRENCY_ID = CURRENCY.toUpperCase();
+  assert.equal((await f.call('/api/bitpanda/status')).body.currency_id, CURRENCY);
+});

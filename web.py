@@ -9,11 +9,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from bot import Config, backtest, read_prices
-from bitpanda import BrokerError, TradingService
+from bitpanda import BrokerError, TradingService, identifier
 from access import AccessPolicy
 
 ROOT = Path(__file__).resolve().parent
 MAX_BODY = 2_000_000
+STATIC = {'/': ('index.html', 'text/html'), '/index.html': ('index.html', 'text/html'),
+          '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css'),
+          '/config.js': ('config.js', 'text/javascript'), '/favicon.svg': ('favicon.svg', 'image/svg+xml')}
+READS = {'assets': {'symbol', 'cursor', 'id'}, 'currencies': set(), 'holdings': set(), 'operations': {'cursor'}}
+LIVE_ACTIONS = {'/api/bitpanda/quote': 'quote', '/api/bitpanda/accept': 'accept', '/api/bitpanda/reconcile': 'reconcile'}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -49,35 +54,41 @@ class Handler(BaseHTTPRequestHandler):
         if not self.local_request():
             return
         parsed = urlsplit(self.path)
-        if self.path == '/health':
+        path = parsed.path
+        if path == '/health':
             return self.reply(200, {'status': 'ok'})
-        if parsed.path == '/api/session':
+        if path == '/api/session':
             return self.reply(200, {'csrf_token': self.csrf_token})
-        if parsed.path == '/api/bitpanda/status':
+        if path == '/api/bitpanda/status':
             return self.reply(200, self.broker.status())
-        if parsed.path.startswith('/api/bitpanda/'):
-            resource = parsed.path.removeprefix('/api/bitpanda/')
+        if path.startswith('/api/bitpanda/'):
+            resource = path.removeprefix('/api/bitpanda/')
             try:
-                if resource == 'journal':
-                    return self.reply(200, {'orders': self.broker.journal()})
-                query = parse_qs(parsed.query)
-                allowed = {'assets': {'symbol', 'cursor'}, 'currencies': set(), 'holdings': set(), 'operations': {'cursor'}}
-                if resource not in allowed or set(query) - allowed[resource] or any(len(v) != 1 or len(v[0]) > 200 for v in query.values()):
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if any(len(v) != 1 or len(v[0]) > 200 for v in query.values()):
                     raise BrokerError('Requête Bitpanda invalide.', 400)
                 params = {key: values[0] for key, values in query.items()}
+                if resource == 'journal' and not params:
+                    return self.reply(200, {'orders': self.broker.journal()})
+                if resource == 'ticker' and set(params) == {'assetId'}:
+                    return self.reply(200, {'result': self.broker.client.ticker(params['assetId'])})
+                if resource not in READS or set(params) - READS[resource]:
+                    raise BrokerError('Requête Bitpanda invalide.', 400)
+                if 'id' in params:
+                    params['id'] = identifier(params['id'])
                 if resource in ('assets', 'operations'):
                     params['pageSize'] = 50
                 return self.reply(200, {'result': self.broker.client.read(resource, params)})
             except BrokerError as error:
                 return self.reply(error.status, {'error': str(error)})
-        routes = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'),
-                  '/style.css': ('style.css', 'text/css'), '/config.js': ('config.js', 'text/javascript'),
-                  '/examples/prices.csv': ('../examples/prices.csv', 'text/csv')}
-        if self.path == '/api/example':
-            return self.reply(200, {'csv': (ROOT / 'examples/prices.csv').read_text()})
-        if self.path not in routes:
+        if path in ('/api/example', '/examples/prices.csv'):
+            text = (ROOT / 'examples/prices.csv').read_text()
+            if path == '/api/example':
+                return self.reply(200, {'csv': text})
+            return self.reply(200, text.encode(), 'text/csv; charset=utf-8')
+        if path not in STATIC:
             return self.reply(404, {'error': 'Page introuvable.'})
-        name, mime = routes[self.path]
+        name, mime = STATIC[path]
         self.reply(200, (ROOT / 'static' / name).read_bytes(), mime + '; charset=utf-8')
 
     def do_OPTIONS(self):
@@ -100,8 +111,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.local_request():
             return
-        live = self.path in ('/api/bitpanda/quote', '/api/bitpanda/accept')
-        if self.path != '/api/backtest' and not live:
+        path = urlsplit(self.path).path
+        live = path in LIVE_ACTIONS
+        if path != '/api/backtest' and not live:
             return self.reply(404, {'error': 'Route introuvable.'})
         if live and not secrets.compare_digest(self.headers.get('X-CSRF-Token', ''), self.csrf_token):
             return self.reply(403, {'error': 'Session invalide. Rechargez la page.'})
@@ -113,8 +125,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(413, {'error': 'Requête vide ou supérieure à 2 Mo.'})
             data = json.loads(self.rfile.read(length))
             if live:
-                action = self.broker.quote if self.path.endswith('/quote') else self.broker.accept
-                return self.reply(200, action(data))
+                return self.reply(200, getattr(self.broker, LIVE_ACTIONS[path])(data))
             if not isinstance(data, dict) or not isinstance(data.get('csv'), str):
                 raise ValueError('Données CSV requises.')
             settings = data.get('config', {})
@@ -134,9 +145,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(prices) > 20000:
                 raise ValueError('Maximum : 20 000 observations par backtest.')
             self.reply(200, backtest(prices, config))
+        except UnicodeEncodeError:
+            self.reply(400, {'error': 'Fichier CSV illisible : enregistrez-le en UTF-8.'})
         except BrokerError as error:
             self.reply(error.status, {'error': str(error)})
-        except (ValueError, TypeError, OverflowError) as error:
+        except (ValueError, TypeError, OverflowError, AttributeError) as error:
             self.reply(400, {'error': str(error)})
 
 

@@ -1,40 +1,270 @@
 <!doctype html>
 <html lang="fr">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>BDL · Trading Studio</title><link rel="stylesheet" href="./style.css"><script src="./config.js" defer></script><script src="./app.js" defer></script></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<title>BDL Trading</title>
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./style.css">
+<script src="./config.js" defer></script>
+<script src="./app.js" defer></script>
+</head>
 <body>
-<aside><a class="brand" href="./">BDL<span>TRADING STUDIO</span></a><button id="nav-live" class="nav active" aria-pressed="true">◎ &nbsp; Bitpanda · Réel</button><button id="nav-lab" class="nav" aria-pressed="false">◈ &nbsp; Laboratoire</button><div class="aside-bottom">VOTRE ESPACE DE TRADING<br><small>Votre compte. Vos décisions.</small></div></aside>
-<main><header><div id="breadcrumb" class="breadcrumb">ESPACE DE TRAVAIL / BITPANDA</div><span id="mode-badge" class="badge">● &nbsp; Compte à connecter</span></header>
-<section id="live-view">
-<section id="server-panel" class="panel server-panel" hidden><h2>Se connecter à votre serveur</h2><p class="hint">Le site est hébergé sur GitHub Pages. Votre compte Bitpanda est géré par votre serveur sécurisé.</p><form id="server-form"><label>Adresse HTTPS du serveur<input id="server-url" type="url" placeholder="https://votre-serveur.example" required autocomplete="off"></label><label>Code d'accès personnel au serveur<input id="server-token" type="password" required autocomplete="off"></label><p class="hint">Ce code protège votre tableau de bord. Ne saisissez pas votre clé API Bitpanda ici.</p><button id="server-connect" type="submit">Connecter le serveur</button> <button id="server-disconnect" type="button" class="secondary">Se déconnecter</button></form><p id="server-message" class="hint" role="status"></p></section>
-<section class="intro"><div><p class="eyebrow">VOTRE COMPTE BITPANDA</p><h1>Vos investissements.<br><em>Un accès direct au marché.</em></h1><p class="sub">Consultez votre portefeuille et confirmez vos achats et ventes.</p></div><div class="status"><span class="dot"></span> API de production<div>Chaque ordre engage des fonds réels</div></div></section>
-<div class="panel connection"><div><h2 id="connection-title">Vérification de la configuration…</h2><p id="connection-detail" class="hint" role="status">Connexion à Bitpanda non vérifiée.</p><p id="limits" class="hint"></p></div><button id="refresh-account" class="secondary">Actualiser le compte</button></div>
-<p id="live-error" role="alert"></p>
-<div class="workspace live-workspace"><section class="panel settings"><div class="section-title"><h2>Passer un ordre réel</h2><span>BITPANDA</span></div>
-<p class="hint">Le montant est exprimé dans la devise choisie, à l'achat comme à la vente. Seuls les actifs accessibles à votre compte peuvent être négociés.</p>
-<form id="asset-search"><label>Rechercher un symbole<input id="asset-symbol" placeholder="Ex. BTC" maxlength="40" required autocomplete="off"></label><button class="secondary" type="submit" id="search-assets">Rechercher sur Bitpanda</button></form><p id="asset-info" class="hint"></p>
-<form id="order-form"><label>Actif<select id="asset-id" required><option value="">Recherchez et sélectionnez un actif</option></select></label>
-<label>Devise<select id="currency-id" required><option value="">Actualisez le compte</option></select></label><p id="currency-info" class="hint"></p>
-<div class="fields"><label>Sens<select id="order-side"><option value="BUY">Acheter</option><option value="SELL">Vendre</option></select></label><label>Montant en devise<input id="order-amount" type="number" min="0.00000001" step="any" required placeholder="Votre montant"></label></div>
-<button id="request-quote" type="submit" disabled>Obtenir un devis Bitpanda</button><p class="hint">Demander un devis n'exécute aucun ordre. Un seul devis peut être actif à la fois.</p></form>
-</section><section class="results"><div class="panel" id="quote-panel"><div class="section-title"><h2>Vérifier et confirmer</h2><span id="quote-expiry">Aucun devis</span></div><p id="quote-empty" class="hint">Le prix et la quantité seront fournis par Bitpanda avant votre confirmation.</p><div id="quote-details" hidden><dl id="quote-summary"></dl><p class="hint">Les chiffres ci-dessus sont ceux du devis Bitpanda. Consultez les conditions et frais applicables à votre compte.</p><label class="check-label"><input type="checkbox" id="confirm-real">Je confirme cet ordre sur mon compte Bitpanda avec des fonds réels.</label><button id="accept-quote" class="danger-button" disabled>Exécuter l'ordre réel</button></div><p id="order-result" role="status"></p></div>
-<div class="panel holdings-panel"><div class="section-title"><h2>Portefeuille Bitpanda</h2><span>LECTURE SEULE</span></div><p id="holdings-status" class="hint">Actualisez le compte pour consulter vos positions réelles.</p><div class="table-scroll"><table><thead><tr><th>Actif (UUID)</th><th>Quantité</th><th>Valeur</th><th>Devise (UUID)</th></tr></thead><tbody id="holdings"></tbody></table></div></div>
-<div class="panel holdings-panel"><div class="section-title"><h2>Journal des ordres de l'application</h2><button id="refresh-orders" class="text-button">Actualiser</button></div><p class="hint">En cas de résultat inconnu, vérifiez l'historique sur Bitpanda avant toute nouvelle opération.</p><div class="table-scroll"><table><thead><tr><th>Devis</th><th>Sens</th><th>Montant</th><th>État</th></tr></thead><tbody id="live-orders"></tbody></table></div><button id="read-operations" class="secondary">Consulter les opérations Bitpanda</button><pre id="operations" hidden></pre></div>
-</section></div><div class="panel setup-help"><h2>Connecter votre compte</h2><p>Hébergement sans abonnement : <a href="https://github.com/bdlglua/BDLTradingBot/blob/main/CLOUDFLARE.md" target="_blank" rel="noopener noreferrer">installer le serveur avec Cloudflare Workers et D1 Free</a>. L'offre gratuite comporte des quotas d'utilisation.</p><p>Créez une clé dans <a href="https://app.bitpanda.com/my-account/apikey" target="_blank" rel="noopener noreferrer">les paramètres API Bitpanda</a>, puis ajoutez-la aux secrets de votre serveur. La clé reste côté serveur.</p><p>Définissez ensuite votre devise et votre plafond par ordre avant d'activer le trading. Aucun robot autonome ne tourne en arrière-plan : chaque devis doit être confirmé ici.</p></div>
-</section>
-<section id="lab-view" hidden>
-<p id="lab-capability" class="panel hint" hidden>Le laboratoire n'est pas disponible avec ce serveur. L'espace Bitpanda reste accessible.</p>
-<section class="intro"><div><p class="eyebrow">DE LA STRATÉGIE À LA DÉCISION</p><h1>Votre prochain mouvement,<br><em>testé avant d'agir.</em></h1><p class="sub">Explorez vos données et mesurez votre stratégie de trading.</p></div><div class="status"><span class="dot"></span> Moteur de backtest<div>Exécution locale · Aucun ordre réel</div></div></section>
-<div class="workspace"><section class="panel settings"><div class="section-title"><h2>Configurer la stratégie</h2><span>01</span></div><form id="form">
-<label>Source de données<input id="file" type="file" accept=".csv,text/csv"></label><p class="hint">CSV : timestamp,close · 2 Mo maximum<br>Une seule valeur, dates avec fuseau horaire.</p><button type="button" id="example" class="secondary">Charger l'exemple synthétique</button><p id="source" class="source">Aucun fichier sélectionné</p>
-<div class="divider"></div><h3>Croisement de moyennes mobiles</h3><div class="fields">
-<label>Capital initial<input name="capital" type="number" value="10000" min="1" step="any" required></label>
-<label>Allocation (%)<input name="allocation" type="number" value="20" min="0.01" max="99.99" step="any" required></label>
-<label>Période rapide<input name="fast" type="number" value="5" min="1" max="9999" required></label>
-<label>Période lente<input name="slow" type="number" value="20" min="2" max="10000" required></label>
-<label>Stop de sortie (%)<input name="stop_loss" type="number" value="5" min="0.01" max="99.99" step="any" required></label>
-<label>Frais (%)<input name="fee" type="number" value="0.1" min="0.001" max="99.99" step="any" required></label></div>
-<button id="run" type="submit">Lancer le backtest <span>↗</span></button><p id="error" role="alert"></p></form><p class="hint">Les signaux sont exécutés à la clôture suivante. Le stop ne garantit pas un plafond de perte.</p></section>
-<section class="results"><div class="metrics"><article><p>CAPITAL FINAL</p><strong id="equity">—</strong><small>Dans l'unité de vos données</small></article><article><p>RENDEMENT</p><strong id="return">—</strong><small>Frais inclus</small></article><article><p>DRAWDOWN MAX.</p><strong id="drawdown">—</strong><small>Recul depuis un sommet</small></article></div>
-<div class="panel chart-panel"><div class="section-title"><div><h2>Évolution du capital</h2><p id="period" class="hint">Les résultats apparaîtront après votre premier test.</p></div><span class="legend">● &nbsp; Portefeuille</span></div><div id="chart-empty" class="empty"><span>⌁</span><h3>Donnez vie à votre stratégie</h3><p>Importez un CSV ou utilisez notre exemple pour commencer.</p></div><svg id="chart" viewBox="0 0 800 260" role="img" aria-label="Évolution du capital" hidden></svg><p id="position" class="hint"></p></div>
-<div class="panel transactions"><div class="section-title"><h2>Journal des transactions <small id="count">0</small></h2><button id="download" class="text-button" disabled>Exporter JSON ↓</button></div><div class="table-scroll"><table><thead><tr><th>Date</th><th>Sens</th><th>Prix</th><th>Quantité</th><th>Frais</th><th>Signal</th></tr></thead><tbody id="trades"><tr><td colspan="6" class="empty-row">Aucune transaction pour le moment.</td></tr></tbody></table></div></div>
-</section></div></section><footer>BDL Trading Studio <span>Bitpanda · Les ordres confirmés dans l'espace réel engagent votre argent.</span></footer></main></body></html>
+<div class="app">
+  <nav class="sidebar" aria-label="Navigation principale">
+    <a class="brand" href="#overview" aria-label="BDL Trading, tableau de bord">
+      <img src="./favicon.svg" alt="" width="32" height="32">
+      <span>BDL<small>Trading</small></span>
+    </a>
+    <div class="nav-list">
+      <button class="nav" data-view="overview" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4zm0 7h6v-5H4zm10 0h6v-9h-6zm0-16v5h6V4z"/></svg><span>Portefeuille</span></button>
+      <button class="nav" data-view="trade" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4 3 8l4 4V9h7V7H7zm10 8v3h-7v2h7v3l4-4z"/></svg><span>Trader</span></button>
+      <button class="nav" data-view="history" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 3a9 9 0 0 0-9 9H1l4 4 4-4H6a7 7 0 1 1 2.05 4.95l-1.42 1.42A9 9 0 1 0 13 3m-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z"/></svg><span>Historique</span></button>
+      <button class="nav" data-view="lab" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25 9 11.25l4 4L21 7.27 19.59 5.86 13 12.45l-4-4-7.41 7.42zM3 21h18v-2H3z"/></svg><span>Laboratoire</span></button>
+      <button class="nav" data-view="settings" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.5 7.5 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7 7 0 0 0-1.7-1L15 3h-4l-.4 2.9a7 7 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.5 7.5 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7 7 0 0 0 1.7 1L11 21h4l.4-2.9a7 7 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7"/></svg><span>Connexion</span></button>
+    </div>
+    <p class="sidebar-note">Aucun robot autonome&nbsp;: chaque ordre réel est confirmé par vous.</p>
+  </nav>
+
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow" id="view-eyebrow">Bitpanda</p>
+        <h1 id="view-title">Portefeuille</h1>
+      </div>
+      <div class="topbar-actions">
+        <span id="connection-pill" class="pill pill-muted" role="status"><span class="dot"></span><span id="connection-label">Non connecté</span></span>
+        <button id="refresh" class="btn btn-ghost" type="button" title="Actualiser les données" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A8 8 0 1 0 19.73 14h-2.08A6 6 0 1 1 12 6a5.9 5.9 0 0 1 4.22 1.78L13 11h7V4z"/></svg><span>Actualiser</span></button>
+      </div>
+    </header>
+
+    <div id="alert" class="alert" role="alert" hidden><span id="alert-text"></span><button id="alert-close" type="button" class="icon-btn" aria-label="Fermer">×</button></div>
+
+    <!-- ============ PORTEFEUILLE ============ -->
+    <section id="view-overview" class="view" aria-labelledby="view-title">
+      <div id="onboarding" class="card onboarding" hidden>
+        <div>
+          <h2>Connectez votre serveur pour commencer</h2>
+          <p class="muted">Votre clé Bitpanda reste dans les secrets de votre serveur. Ce site ne la voit jamais.</p>
+        </div>
+        <button class="btn btn-primary" type="button" data-goto="settings">Se connecter</button>
+      </div>
+
+      <div class="kpis">
+        <article class="kpi"><p>Valeur du portefeuille</p><strong id="kpi-value">—</strong><small id="kpi-value-note">Actualisez le compte</small></article>
+        <article class="kpi"><p>Positions</p><strong id="kpi-positions">—</strong><small>Actifs détenus</small></article>
+        <article class="kpi"><p>Trading réel</p><strong id="kpi-trading">—</strong><small id="kpi-trading-note">Configuration serveur</small></article>
+        <article class="kpi"><p>Plafond par ordre</p><strong id="kpi-limit">—</strong><small id="kpi-limit-note">Défini sur le serveur</small></article>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Positions</h2><p id="holdings-status" class="muted small">Actualisez le compte pour afficher vos positions réelles.</p></div>
+          <button class="btn btn-secondary btn-sm" type="button" data-goto="trade">Passer un ordre</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Actif</th><th class="num">Quantité</th><th class="num">Valeur</th><th class="share-col">Répartition</th></tr></thead>
+            <tbody id="holdings"><tr class="empty"><td colspan="4">Aucune donnée pour le moment.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ TRADER ============ -->
+    <section id="view-trade" class="view" hidden>
+      <div class="trade-grid">
+        <div class="card ticket">
+          <div class="card-head"><h2>Nouvel ordre</h2><span class="tag tag-danger">Fonds réels</span></div>
+          <p id="trading-disabled" class="notice" hidden></p>
+
+          <div class="segmented" role="radiogroup" aria-label="Sens de l'ordre">
+            <button type="button" class="seg seg-buy" role="radio" aria-checked="true" data-side="BUY">Acheter</button>
+            <button type="button" class="seg seg-sell" role="radio" aria-checked="false" data-side="SELL">Vendre</button>
+          </div>
+
+          <form id="asset-search" class="field" autocomplete="off">
+            <label for="asset-symbol">Actif</label>
+            <div class="input-row">
+              <input id="asset-symbol" placeholder="Symbole, ex. BTC, ETH, AAPL" maxlength="40" required>
+              <button id="search-assets" class="btn btn-secondary" type="submit">Rechercher</button>
+            </div>
+          </form>
+          <div id="asset-results" class="asset-results" role="listbox" aria-label="Résultats de recherche" hidden></div>
+          <div id="asset-selected" class="asset-selected" hidden>
+            <div><strong id="asset-selected-symbol"></strong><span id="asset-selected-type" class="tag"></span></div>
+            <div class="price"><span id="asset-price">Prix indicatif…</span><button id="asset-clear" type="button" class="link-btn">Changer</button></div>
+          </div>
+
+          <form id="order-form" autocomplete="off">
+            <div class="field">
+              <label for="currency-id">Devise</label>
+              <select id="currency-id" required><option value="">Actualisez le compte</option></select>
+            </div>
+            <div class="field">
+              <label for="order-amount">Montant <span id="amount-side-hint" class="muted">à investir</span></label>
+              <div class="amount">
+                <input id="order-amount" inputmode="decimal" placeholder="0,00" maxlength="36" required>
+                <span id="amount-currency" class="amount-suffix">—</span>
+              </div>
+              <p id="amount-hint" class="muted small">Montant exprimé dans la devise, à l'achat comme à la vente.</p>
+            </div>
+            <button id="request-quote" class="btn btn-primary btn-block" type="submit" disabled>Obtenir un devis</button>
+            <p class="muted small center">Un devis n'exécute rien. Un seul devis peut être actif à la fois.</p>
+          </form>
+        </div>
+
+        <div class="card quote" id="quote-card">
+          <div class="card-head"><h2>Vérifier et confirmer</h2><span id="quote-expiry" class="tag">Aucun devis</span></div>
+          <div id="quote-empty" class="empty-state">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zm-1 7V3.5L18.5 9zM8 13h8v2H8zm0 4h5v2H8z"/></svg>
+            <p>Le prix et la quantité de Bitpanda s'afficheront ici avant toute confirmation.</p>
+          </div>
+          <div id="quote-details" hidden>
+            <div class="progress" aria-hidden="true"><span id="quote-progress"></span></div>
+            <p id="quote-headline" class="quote-headline"></p>
+            <dl id="quote-summary" class="summary"></dl>
+            <p class="muted small">Chiffres fournis par le devis Bitpanda. Consultez les conditions et frais applicables à votre compte.</p>
+            <label class="check"><input type="checkbox" id="confirm-real"><span>Je confirme cet ordre sur mon compte Bitpanda avec des fonds réels.</span></label>
+            <div class="quote-actions">
+              <button id="cancel-quote" class="btn btn-ghost" type="button">Ignorer</button>
+              <button id="accept-quote" class="btn btn-danger" type="button" disabled>Exécuter l'ordre réel</button>
+            </div>
+          </div>
+          <p id="order-result" class="result" role="status"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ HISTORIQUE ============ -->
+    <section id="view-history" class="view" hidden>
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Journal des ordres</h2><p class="muted small">Devis et ordres passés depuis cette application.</p></div>
+          <button id="refresh-orders" class="btn btn-secondary btn-sm" type="button">Actualiser</button>
+        </div>
+        <p id="journal-status" class="notice" hidden></p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Date</th><th>Actif</th><th>Sens</th><th class="num">Montant</th><th>État</th><th></th></tr></thead>
+            <tbody id="live-orders"><tr class="empty"><td colspan="6">Aucun ordre enregistré.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Opérations Bitpanda</h2><p class="muted small">Historique de votre compte, page par page.</p></div>
+          <button id="read-operations" class="btn btn-secondary btn-sm" type="button">Charger</button>
+        </div>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Date</th><th>Type</th><th>Actif</th><th class="num">Montant</th></tr></thead>
+            <tbody id="operations"><tr class="empty"><td colspan="4">Cliquez sur « Charger » pour consulter vos opérations.</td></tr></tbody>
+          </table>
+        </div>
+        <button id="more-operations" class="btn btn-ghost btn-block" type="button" hidden>Charger plus</button>
+      </div>
+    </section>
+
+    <!-- ============ LABORATOIRE ============ -->
+    <section id="view-lab" class="view" hidden>
+      <p id="lab-capability" class="notice" hidden>Le laboratoire nécessite le serveur Python : le Worker Cloudflare gratuit ne l'exécute pas. Lancez <code>python3 web.py</code> en local pour l'utiliser.</p>
+      <div class="lab-grid">
+        <form id="form" class="card lab-config" novalidate>
+          <div class="card-head"><h2>Stratégie</h2><span class="tag">Simulation</span></div>
+          <label class="dropzone" id="dropzone">
+            <input id="file" type="file" accept=".csv,text/csv">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.35 10.04A7.49 7.49 0 0 0 5.35 8.04 6 6 0 0 0 6 20h13a5 5 0 0 0 .35-9.96M14 13v4h-4v-4H7l5-5 5 5z"/></svg>
+            <span id="source">Déposez un CSV ou cliquez pour choisir</span>
+            <small>Colonnes timestamp,close · séparateur , ou ; · 2 Mo max.</small>
+          </label>
+          <button type="button" id="example" class="link-btn">Utiliser l'exemple synthétique</button>
+          <h3>Croisement de moyennes mobiles</h3>
+          <div class="grid-2">
+            <div class="field"><label for="capital">Capital initial</label><input id="capital" name="capital" type="number" value="10000" min="1" step="any" required></div>
+            <div class="field"><label for="allocation">Allocation (%)</label><input id="allocation" name="allocation" type="number" value="20" min="0.01" max="99.99" step="any" required></div>
+            <div class="field"><label for="fast">Période rapide</label><input id="fast" name="fast" type="number" value="5" min="1" max="9999" step="1" required></div>
+            <div class="field"><label for="slow">Période lente</label><input id="slow" name="slow" type="number" value="20" min="2" max="10000" step="1" required></div>
+            <div class="field"><label for="stop_loss">Stop de sortie (%)</label><input id="stop_loss" name="stop_loss" type="number" value="5" min="0.01" max="99.99" step="any" required></div>
+            <div class="field"><label for="fee">Frais (%)</label><input id="fee" name="fee" type="number" value="0.1" min="0.001" max="99.99" step="any" required></div>
+          </div>
+          <button id="run" class="btn btn-primary btn-block" type="submit">Lancer le backtest</button>
+          <p id="error" class="form-error" role="alert"></p>
+          <p class="muted small">Signal à la clôture, exécution à la clôture suivante. Le stop ne garantit pas un plafond de perte. Aucun ordre réel.</p>
+        </form>
+
+        <div class="lab-results">
+          <div class="kpis kpis-3">
+            <article class="kpi"><p>Capital final</p><strong id="equity">—</strong><small>Unité de vos données</small></article>
+            <article class="kpi"><p>Rendement</p><strong id="return">—</strong><small>Frais inclus</small></article>
+            <article class="kpi"><p>Drawdown max.</p><strong id="drawdown">—</strong><small>Recul depuis un sommet</small></article>
+          </div>
+          <div class="card">
+            <div class="card-head"><div><h2>Évolution du capital</h2><p id="period" class="muted small">Les résultats apparaîtront après votre premier test.</p></div>
+              <div class="legend"><span class="lg lg-line">Capital</span><span class="lg lg-buy">Achat</span><span class="lg lg-sell">Vente</span></div></div>
+            <div id="chart-empty" class="empty-state"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 18.49 9.5 12.5l4 4L22 6.92 20.59 5.5 13.5 13.48l-4-4L2 16.99z"/></svg><p>Importez un CSV ou utilisez l'exemple pour commencer.</p></div>
+            <div class="chart-box"><svg id="chart" viewBox="0 0 800 280" role="img" aria-label="Évolution du capital" hidden></svg></div>
+            <p id="position" class="muted small"></p>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Transactions <span id="count" class="tag">0</span></h2><button id="download" class="btn btn-secondary btn-sm" type="button" disabled>Exporter JSON</button></div>
+            <div class="table-wrap">
+              <table class="table"><thead><tr><th>Date</th><th>Sens</th><th class="num">Prix</th><th class="num">Quantité</th><th class="num">Frais</th><th>Signal</th></tr></thead>
+              <tbody id="trades"><tr class="empty"><td colspan="6">Aucune transaction pour le moment.</td></tr></tbody></table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CONNEXION ============ -->
+    <section id="view-settings" class="view" hidden>
+      <div class="settings-grid">
+        <div class="card" id="server-panel">
+          <div class="card-head"><h2>Serveur sécurisé</h2><span id="server-mode" class="tag">—</span></div>
+          <form id="server-form" autocomplete="off">
+            <div class="field"><label for="server-url">Adresse HTTPS du serveur</label><input id="server-url" type="url" placeholder="https://votre-worker.workers.dev" required></div>
+            <div class="field"><label for="server-token">Code d'accès au tableau de bord</label><input id="server-token" type="password" required autocomplete="off"><p class="muted small">Ce code (DASHBOARD_ACCESS_TOKEN) protège votre tableau de bord. Ce n'est <strong>pas</strong> votre clé Bitpanda. Il reste en mémoire dans cet onglet uniquement.</p></div>
+            <div class="btn-row"><button id="server-connect" class="btn btn-primary" type="submit">Connecter</button><button id="server-disconnect" class="btn btn-ghost" type="button">Se déconnecter</button></div>
+          </form>
+          <p id="local-server" class="notice" hidden>Serveur local détecté : connexion automatique, sans code d'accès.</p>
+          <p id="server-message" class="result" role="status"></p>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>État de la configuration</h2></div>
+          <ul class="checklist" id="checklist">
+            <li data-check="server"><span class="check-icon"></span><div><strong>Serveur joignable</strong><small>Adresse et code d'accès</small></div></li>
+            <li data-check="key"><span class="check-icon"></span><div><strong>Clé API Bitpanda</strong><small>Secret BITPANDA_API_KEY</small></div></li>
+            <li data-check="account"><span class="check-icon"></span><div><strong>Compte lu</strong><small>Portefeuille actualisé avec succès</small></div></li>
+            <li data-check="journal"><span class="check-icon"></span><div><strong>Journal des ordres</strong><small>Base persistante (D1 ou SQLite)</small></div></li>
+            <li data-check="trading"><span class="check-icon"></span><div><strong>Trading réel</strong><small id="trading-reason">Devise, plafond et activation</small></div></li>
+          </ul>
+          <p class="muted small">Guides : <a href="https://github.com/bdlglua/BDLTradingBot/blob/main/CLOUDFLARE.md" target="_blank" rel="noopener noreferrer">serveur gratuit Cloudflare</a> · <a href="https://app.bitpanda.com/my-account/apikey" target="_blank" rel="noopener noreferrer">clés API Bitpanda</a></p>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">BDL Trading · API de production Bitpanda · Les ordres confirmés engagent des fonds réels.</footer>
+  </div>
+</div>
+
+<dialog id="reconcile-dialog" class="dialog">
+  <form id="reconcile-form" method="dialog" novalidate>
+    <h2>Rapprocher l'ordre</h2>
+    <p class="muted">Ouvrez l'historique de vos opérations sur Bitpanda et indiquez ce que vous constatez pour ce devis. Aucune requête n'est envoyée à Bitpanda : seul le journal est mis à jour, ce qui débloque les nouveaux devis.</p>
+    <dl id="reconcile-summary" class="summary"></dl>
+    <fieldset class="radios">
+      <legend>Résultat constaté sur Bitpanda</legend>
+      <label><input type="radio" name="outcome" value="executed" required> L'ordre a été exécuté</label>
+      <label><input type="radio" name="outcome" value="not_executed" required> L'ordre n'apparaît pas : non exécuté</label>
+    </fieldset>
+    <label class="check"><input type="checkbox" id="reconcile-checked" required><span>J'ai vérifié l'historique de mes opérations Bitpanda.</span></label>
+    <p id="reconcile-error" class="form-error" role="alert"></p>
+    <div class="btn-row end"><button type="button" id="reconcile-cancel" class="btn btn-ghost">Annuler</button><button type="submit" id="reconcile-submit" class="btn btn-primary">Enregistrer</button></div>
+  </form>
+</dialog>
+<div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from bitpanda import BitpandaClient, BrokerError, TradingService
+from bitpanda import BitpandaClient, BrokerError, TradingService, upstream_detail
 
 ASSET = '11111111-1111-4111-8111-111111111111'
 CURRENCY = '22222222-2222-4222-8222-222222222222'
@@ -28,8 +28,8 @@ class FakeBitpanda:
             if self.fail_accept:
                 raise BrokerError('Timeout fictif.', 502)
             return {'id': 'fake-operation'}
-        return dict(body, id=QUOTE, price='50000', quantity='0.002',
-                    expiresAt=(datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(), **self.overrides)
+        return {**body, 'id': QUOTE, 'price': '50000', 'quantity': '0.002',
+                'expiresAt': (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(), **self.overrides}
 
 
 class TradingTests(unittest.TestCase):
@@ -132,3 +132,44 @@ class TradingTests(unittest.TestCase):
         with patch.object(client.opener, 'open') as opened, self.assertRaises(BrokerError):
             client.read('holdings')
         opened.assert_not_called()
+
+    def test_reconcile_after_unknown_result_unblocks_without_network(self):
+        quote = self.service.quote(self.request)
+        self.client.fail_accept = True
+        with self.assertRaises(BrokerError):
+            self.service.accept(self.confirmation(quote))
+        body = dict(quote_id=QUOTE, outcome='executed', confirm_checked_bitpanda=True)
+        for change in ({'confirm_checked_bitpanda': False}, {'outcome': 'maybe'}):
+            with self.assertRaises(BrokerError):
+                self.service.reconcile(dict(body, **change))
+        with self.assertRaisesRegex(BrokerError, 'Attendez'):
+            self.service.reconcile(body)
+        calls = len(self.client.calls)
+        later = datetime.now(timezone.utc) + timedelta(minutes=5)
+        with patch('bitpanda.datetime') as clock:
+            clock.now.return_value = later
+            clock.fromisoformat = datetime.fromisoformat
+            self.assertEqual(self.service.reconcile(body)['state'], 'executed')
+        self.assertEqual(len(self.client.calls), calls)
+        self.assertEqual(self.service.journal()[0]['quote']['reconciled'], 'executed')
+        with self.assertRaises(BrokerError):
+            self.service.reconcile(body)
+        self.client.fail_accept = False
+        self.client.overrides = {'id': '44444444-4444-4444-8444-444444444444'}
+        self.assertEqual(self.service.quote(self.request)['quote']['id'], '44444444-4444-4444-8444-444444444444')
+
+    def test_quote_accepts_uppercase_uuids_from_bitpanda(self):
+        self.client.overrides = {'assetId': ASSET.upper(), 'currencyId': CURRENCY.upper()}
+        result = self.service.quote(self.request)
+        self.assertEqual(result['quote']['assetId'], ASSET)
+
+    def test_journal_reports_expired_pending_quotes(self):
+        self.service.quote(self.request)
+        with patch('bitpanda.is_expired', return_value=True):
+            self.assertEqual(self.service.journal()[0]['state'], 'expired')
+
+    def test_upstream_error_detail_is_short_and_printable(self):
+        self.assertEqual(upstream_detail(b'{"message": "Insufficient\\nfunds"}'), 'Insufficient funds')
+        self.assertEqual(upstream_detail(b'{"errors": [{"detail": "Quote expired"}]}'), 'Quote expired')
+        self.assertEqual(upstream_detail(b'<html>'), '')
+        self.assertEqual(len(upstream_detail(('{"error": "%s"}' % ('x' * 500)).encode())), 200)

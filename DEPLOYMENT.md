@@ -35,6 +35,6 @@ node --check static/app.js
 python3 tools/build_pages.py
 ```
 
-Les 14 tests Workers utilisent une API Bitpanda fictive et un véritable moteur SQLite pour vérifier le SQL de D1. Ils ne prouvent pas qu'un Worker distant a été déployé ou qu'un compte réel est accessible. Node 24 est requis pour ces tests, pas pour utiliser le site.
+Les 18 tests Workers utilisent une API Bitpanda fictive et un véritable moteur SQLite pour vérifier le SQL de D1. Ils ne prouvent pas qu'un Worker distant a été déployé ou qu'un compte réel est accessible. Node 24 est requis pour ces tests, pas pour utiliser le site.
 
 Tests facultatifs avec Playwright et Chromium : `python3 tests/browser_smoke.py` et `python3 tests/browser_pages.py`. Pour tester le backend Python dans un moteur Docker Linux local, construisez `docker build -t bdltradingbot:pages .`, puis exécutez `python3 tests/docker_smoke.py`. Ces tests ne passent aucun ordre réel.
