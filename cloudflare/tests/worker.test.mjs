@@ -40,7 +40,7 @@ function fixture(t) {
     BITPANDA_TRADING_CURRENCY_ID: CURRENCY, BITPANDA_MAX_ORDER_AMOUNT: '100'};
   const state = {now: Date.now(), calls: [], failAccept: false, failStore: false, overrides: {}};
   const transport = async (url, options) => {
-    assert.ok(url.startsWith('https://api.public.bitpanda.com/'));
+    assert.ok(url.startsWith('https://api.public.bitpanda.com/v1/'));
     assert.equal(options.redirect, 'manual');
     if (state.respond) return state.respond(url, options);
     assert.equal(options.headers['x-api-key'], env.BITPANDA_API_KEY);
@@ -50,10 +50,14 @@ function fixture(t) {
       if (state.failStore) db.failBatch = true;
       return Response.json({});
     }
-    if (url.endsWith('/rfq/quotes')) {
+    if (url.endsWith('/v1/quotes')) {
+      // Format documented for production: snake_case, wrapped in data, prices in a nested quote.
       const body = JSON.parse(options.body);
-      return Response.json({...body, id: crypto.randomUUID(), price: '50000', quantity: '.002'.replace(/^\./, '0.'),
-        expiresAt: new Date(state.now + 60000).toISOString(), ...state.overrides});
+      assert.deepEqual(Object.keys(body).sort(), ['asset_id', 'currency_id', 'notional', 'side']);
+      const {notional, ...overrides} = state.overrides;
+      return Response.json({data: {quote_id: crypto.randomUUID(), status: 'OPEN', side: body.side, asset_id: body.asset_id,
+        currency_id: body.currency_id, quote: {price: '49900', price_with_premium: '50000', premium: '100', quantity: '0.002',
+          notional: notional ?? body.notional, expires_at: new Date(state.now + 60000).toISOString()}, ...overrides}});
     }
     return Response.json([]);
   };
@@ -212,7 +216,7 @@ test('code d’accès manquant : erreur lisible par le site, aucune donnée', as
 test('prix indicatif, recherche par UUID et détail d’erreur Bitpanda', async t => {
   const f = fixture(t);
   assert.equal((await f.call('/api/bitpanda/ticker?assetId=' + ASSET.toUpperCase())).status, 200);
-  assert.ok(f.state.calls.at(-1).url.endsWith(`/assets/${ASSET}/ticker`));
+  assert.ok(f.state.calls.at(-1).url.endsWith(`/v1/tickers/${ASSET}`));
   assert.equal((await f.call('/api/bitpanda/ticker?assetId=../x')).status, 400);
   assert.equal((await f.call('/api/bitpanda/assets?id=' + ASSET)).status, 200);
   assert.equal((await f.call('/api/bitpanda/assets?id=nope')).status, 400);
@@ -223,14 +227,29 @@ test('échec réseau, délai et redirection Bitpanda : cause et route indiquées
   const f = fixture(t);
   f.state.respond = async () => { throw Object.assign(new Error('The operation was aborted due to timeout'), {name: 'TimeoutError'}); };
   let result = await f.call('/api/bitpanda/currencies');
-  assert.equal(result.status, 502); assert.match(result.body.error, /GET \/currencies, délai de 15 s dépassé/);
+  assert.equal(result.status, 502); assert.match(result.body.error, /GET \/v1\/currencies, délai de 15 s dépassé/);
   f.state.respond = async () => { throw new TypeError('fetch failed'); };
-  assert.match((await f.call('/api/bitpanda/holdings')).body.error, /GET \/portfolio\/holdings, erreur réseau : fetch failed/);
+  assert.match((await f.call('/api/bitpanda/holdings')).body.error, /GET \/v1\/portfolio, erreur réseau : fetch failed/);
   const redirected = [];
   f.state.respond = async url => { redirected.push(url); return new Response(null, {status: 301, headers: {Location: 'https://elsewhere.example/currencies?key=x'}}); };
   result = await f.call('/api/bitpanda/currencies');
-  assert.match(result.body.error, /redirigé GET \/currencies vers https:\/\/elsewhere\.example\/currencies \(HTTP 301\)/);
+  assert.match(result.body.error, /redirigé GET \/v1\/currencies vers https:\/\/elsewhere\.example\/currencies \(HTTP 301\)/);
   assert.ok(!result.body.error.includes('key=x')); assert.equal(redirected.length, 1);
   f.state.respond = async () => Response.json({message: 'Invalid API key'}, {status: 401});
-  assert.equal((await f.call('/api/bitpanda/holdings')).body.error, 'Clé Bitpanda refusée. [GET /portfolio/holdings] Détail : Invalid API key');
+  assert.equal((await f.call('/api/bitpanda/holdings')).body.error, 'Clé Bitpanda refusée. [GET /v1/portfolio] Détail : Invalid API key');
+});
+test('formats de devis documentés : snake_case, camelCase et plat, avec prix prime incluse', async () => {
+  const {normalizeQuote} = await import('../worker.mjs');
+  const expected = {id: 'q', assetId: 'a', currencyId: 'c', side: 'BUY', price: '101', quantity: '0.5', notional: '50.5', expiresAt: 'e'};
+  assert.deepEqual(normalizeQuote({data: {quote_id: 'q', side: 'buy', asset_id: 'a', currency_id: 'c', quote: {price: '100', price_with_premium: '101', quantity: '0.5', notional: 50.5, expires_at: 'e'}}}), expected);
+  assert.deepEqual(normalizeQuote({data: {quoteId: 'q', side: 'BUY', assetId: 'a', currencyId: 'c', quote: {priceWithPremium: '101', quantity: '0.5', notional: '50.5', expiresAt: 'e'}}}), expected);
+  assert.deepEqual(normalizeQuote({id: 'q', side: 'BUY', assetId: 'a', currencyId: 'c', price: '101', quantity: '0.5', notional: '50.5', expiresAt: 'e'}), expected);
+  assert.equal(normalizeQuote({data: {quote: {notional: 1e-7}}}).notional, 1e-7, 'notation exponentielle jamais convertie');
+});
+test('devis dans un format inconnu : refusé sans ordre, verrou libéré', async t => {
+  const f = fixture(t); f.state.overrides = {quote_id: undefined, id: undefined};
+  const result = await f.quote();
+  assert.equal(result.status, 502); assert.match(result.body.error, /format inconnu/);
+  assert.equal(f.acceptCalls(), 0);
+  f.state.overrides = {}; assert.equal((await f.quote()).status, 200);
 });

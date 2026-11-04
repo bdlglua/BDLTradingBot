@@ -67,7 +67,7 @@ def upstream_detail(raw):
         if isinstance(value, list) and value:
             value = value[0]
         if isinstance(value, dict):
-            value = value.get('message') or value.get('detail') or value.get('code')
+            value = value.get('message') or value.get('detail') or value.get('title') or value.get('code')
         if isinstance(value, str) and value.strip():
             text = ''.join(char if char.isprintable() else ' ' for char in value)
             return ' '.join(text.split())[:200]
@@ -79,6 +79,40 @@ def is_expired(quote, margin=0):
         return instant(quote['expiresAt']) + margin <= datetime.now(timezone.utc).timestamp()
     except (BrokerError, KeyError, TypeError):
         return True
+
+
+def _pick(mapping, *names):
+    if isinstance(mapping, dict):
+        for name in names:
+            if mapping.get(name) is not None:
+                return mapping[name]
+    return None
+
+
+def _decimal_text(value):
+    # Numbers are accepted only when their text form is a plain decimal.
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 'e' not in repr(value).lower():
+        return repr(value)
+    return value
+
+
+def normalize_quote(raw):
+    """Production answers {data: {quote_id, side, asset_id, currency_id, quote: {...}}};
+    the docs also show camelCase and flat variants. All are mapped to one shape."""
+    data = raw['data'] if isinstance(raw, dict) and isinstance(raw.get('data'), dict) else raw
+    inner = data['quote'] if isinstance(data, dict) and isinstance(data.get('quote'), dict) else data
+
+    def field(*names):
+        value = _pick(inner, *names)
+        return value if value is not None else _pick(data, *names)
+    side = field('side')
+    quote_id = _pick(data, 'quote_id', 'quoteId', 'id')
+    return dict(id=quote_id if quote_id is not None else _pick(inner, 'quote_id', 'quoteId', 'id'),
+                assetId=field('asset_id', 'assetId'), currencyId=field('currency_id', 'currencyId'),
+                side=side.upper() if isinstance(side, str) else side,
+                price=_decimal_text(field('price_with_premium', 'priceWithPremium', 'price')),
+                quantity=_decimal_text(field('quantity')), notional=_decimal_text(field('notional')),
+                expiresAt=field('expires_at', 'expiresAt'))
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -127,14 +161,14 @@ class BitpandaClient:
             raise BrokerError('Réponse Bitpanda indisponible ou illisible. Aucun renvoi automatique.', 502) from None
 
     def read(self, resource, query=None):
-        paths = {'assets': '/assets', 'currencies': '/currencies',
-                 'holdings': '/portfolio/holdings', 'operations': '/operations'}
+        paths = {'assets': '/v1/assets', 'currencies': '/v1/currencies',
+                 'holdings': '/v1/portfolio', 'operations': '/v1/operations'}
         if resource not in paths:
             raise BrokerError('Ressource inconnue.', 404)
         return self.request('GET', paths[resource], query=query)
 
     def ticker(self, asset_id):
-        return self.request('GET', f'/assets/{identifier(asset_id)}/ticker')
+        return self.request('GET', f'/v1/tickers/{identifier(asset_id)}')
 
 
 class TradingService:
@@ -210,13 +244,19 @@ class TradingService:
                     if instant(json.loads(row['quote'])['expiresAt']) > datetime.now(timezone.utc).timestamp():
                         raise BrokerError('Un devis est déjà actif. Confirmez-le ou attendez son expiration.', 409)
                 connection.execute("UPDATE orders SET state='expired' WHERE state='pending'")
-                quote = self.client.request('POST', '/rfq/quotes', body=request)
-                if not isinstance(quote, dict):
+                response = self.client.request('POST', '/v1/quotes', body=dict(
+                    asset_id=request['assetId'], currency_id=request['currencyId'],
+                    side=request['side'], notional=request['notional']))
+                if not isinstance(response, dict):
                     raise BrokerError('Devis Bitpanda invalide.', 502)
+                quote = normalize_quote(response)
                 try:
-                    quote_id = identifier(quote['id'])
-                    # UUIDs are compared in canonical form: Bitpanda may change their case.
-                    quote['assetId'], quote['currencyId'] = identifier(quote['assetId']), identifier(quote['currencyId'])
+                    try:
+                        quote_id = identifier(quote['id'])
+                        # UUIDs are compared in canonical form: Bitpanda may change their case.
+                        quote['assetId'], quote['currencyId'] = identifier(quote['assetId']), identifier(quote['currencyId'])
+                    except BrokerError:
+                        raise BrokerError('Devis Bitpanda incomplet ou dans un format inconnu. Aucun ordre envoyé.', 502) from None
                     if any(quote.get(k) != request[k] for k in ('assetId', 'currencyId', 'side')):
                         raise BrokerError('Le devis ne correspond pas à la demande.', 502)
                     if amount(quote.get('notional')) != requested or amount(quote.get('notional')) > limit:
@@ -267,7 +307,7 @@ class TradingService:
                 connection.execute("UPDATE orders SET state='submitted' WHERE id=?", (quote_id,))
                 connection.commit()
                 try:
-                    self.client.request('POST', f'/rfq/quotes/{quote_id}/accept')
+                    self.client.request('POST', f'/v1/quotes/{quote_id}/accept')
                 except Exception as failure:
                     connection.execute("UPDATE orders SET state='unknown' WHERE id=?", (quote_id,))
                     cause = f' ({failure})' if isinstance(failure, BrokerError) else ''

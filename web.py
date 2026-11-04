@@ -77,7 +77,7 @@ class Handler(BaseHTTPRequestHandler):
                 if 'id' in params:
                     params['id'] = identifier(params['id'])
                 if resource in ('assets', 'operations'):
-                    params['pageSize'] = 50
+                    params['page_size'] = 50
                 return self.reply(200, {'result': self.broker.client.read(resource, params)})
             except BrokerError as error:
                 return self.reply(error.status, {'error': str(error)})

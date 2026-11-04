@@ -89,11 +89,18 @@ def main():
                     response = dict(api_key_present=True, trading_enabled=True, reason='', currency_id=CURRENCY,
                                     max_order_amount='100', features={'backtest': True, 'reconcile': True})
                 elif path == 'holdings':
-                    response = {'result': [dict(assetId=ASSET, quantity='0.1', value='5000', equivalentCurrencyId=CURRENCY),
-                                           dict(assetId='55555555-5555-4555-8555-555555555555', quantity='2', value='1250.5',
-                                                equivalentCurrencyId=CURRENCY)]}
+                    # GET /v1/portfolio : snake_case documenté, et variante camelCase.
+                    eth = '55555555-5555-4555-8555-555555555555'
+                    response = {'result': {'data': [
+                        dict(asset_id=ASSET, currency_id=CURRENCY,
+                             balance=dict(value='0.1', asset_id=ASSET),
+                             currency_balance=dict(value='5000', currency_id=CURRENCY),
+                             total_return=dict(value='420.5', currency_id=CURRENCY)),
+                        dict(assetId=eth, balance=dict(value='2', assetId=eth),
+                             currencyBalance=dict(value='1250.5', currencyId=CURRENCY),
+                             totalReturn=dict(value='-30', currencyId=CURRENCY))]}}
                 elif path == 'currencies':
-                    response = {'result': [dict(id=CURRENCY, symbol='EUR'), dict(id='66666666-6666-4666-8666-666666666666', symbol='USD')]}
+                    response = {'result': {'data': [dict(id=CURRENCY, symbol='EUR'), dict(id='66666666-6666-4666-8666-666666666666', symbol='USD')]}}
                 elif path == 'assets' and 'id' in query:
                     symbol = 'BTC' if query['id'][0] == ASSET else 'ETH'
                     response = {'result': {'data': [dict(id=query['id'][0], symbol=symbol, type='CRYPTO')]}}
@@ -101,12 +108,13 @@ def main():
                     assert query['symbol'] == ['BTC']
                     response = {'result': {'data': [dict(id=ASSET, symbol='BTC', type='CRYPTO')]}}
                 elif path == 'ticker':
-                    response = {'result': dict(assetId=ASSET, price='50123.45', currency='EUR')}
+                    response = {'result': {'data': dict(asset_id=ASSET, price='50123.45', currency='EUR')}}
                 elif path == 'journal':
                     response = {'orders': journal}
                 elif path == 'operations':
-                    response = {'result': {'data': [dict(id=QUOTE, type='BUY', assetId=ASSET, amount='0.002',
-                                                         timestamp='2026-11-02T09:00:00Z')]}}
+                    response = {'result': {'data': [dict(id=QUOTE, type='BUY', asset_id=ASSET, amount='0.002',
+                                                         created_at='2026-11-02T09:00:00Z')],
+                                           'has_next_page': False, 'next_cursor': None}}
                 elif path == 'quote':
                     request = route.request.post_data_json
                     assert request == dict(assetId=ASSET, currencyId=CURRENCY, side='BUY', notional='99.5'), request
@@ -128,7 +136,9 @@ def main():
             expect(page.locator('#connection-label')).to_have_text('Trading activé')
             expect(page.locator('#holdings tr')).to_have_count(2)
             expect(page.locator('#holdings')).to_contain_text('BTC')
-            expect(page.locator('#kpi-value')).to_contain_text('6')
+            expect(page.locator('#kpi-value')).to_contain_text('6\u202f250,50 EUR')
+            expect(page.locator('#holdings')).to_contain_text('+420,50 EUR')
+            expect(page.locator('#holdings')).to_contain_text('-30,00 EUR')
             expect(page.locator('#kpi-limit')).to_contain_text('100')
             page.screenshot(path=str(SHOTS / 'bdl-portfolio-desktop.png'), full_page=True)
 
@@ -167,6 +177,8 @@ def main():
             assert reconcile_calls == [dict(quote_id=STUCK, outcome='not_executed', confirm_checked_bitpanda=True)]
             page.locator('#read-operations').click()
             expect(page.locator('#operations')).to_contain_text('BTC')
+            expect(page.locator('#operations')).to_contain_text('02/11/2026')
+            assert page.locator('#more-operations').is_hidden()
             page.screenshot(path=str(SHOTS / 'bdl-history-desktop.png'), full_page=True)
 
             page.set_viewport_size({'width': 390, 'height': 844})

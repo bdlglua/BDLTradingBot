@@ -2,7 +2,7 @@
 
 Interface de trading **Bitpanda Public API de production**, avec portefeuille, recherche d'actifs, demande de devis et confirmation d'ordres réels. Le backend peut être hébergé sans abonnement avec **Cloudflare Workers Free et D1** ; voir [le guide gratuit](CLOUDFLARE.md). Le backend Python 3.12 reste disponible pour le développement et le laboratoire CSV, sans dépendance externe.
 
-Le connecteur est implémenté à partir de la [documentation publique Bitpanda](https://github.com/bitpanda-labs/bitpanda-public-api), notamment le [schéma OpenAPI](https://github.com/bitpanda-labs/bitpanda-public-api/blob/master/docs/openapi.yaml). L'accès à votre compte et les produits disponibles doivent être vérifiés avec votre clé. Les tests automatisés utilisent des réponses fictives et ne prouvent pas qu'un ordre réel fonctionne sur votre compte.
+Le connecteur suit la [documentation hébergée de la Bitpanda Public API](https://docs.public.bitpanda.com/) : base `https://api.public.bitpanda.com/v1`, champs en snake_case, réponses enveloppées dans `data`. Le [schéma OpenAPI du dépôt GitHub de Bitpanda](https://github.com/bitpanda-labs/bitpanda-public-api/blob/master/docs/openapi.yaml) décrit des chemins sans `/v1` (`/rfq/quotes`, `/portfolio/holdings`…) qui répondent HTTP 404 en production ; il n'est plus utilisé. Comme la documentation mélange snake_case et camelCase, les deux sont acceptés en lecture ; un devis dont le format n'est pas reconnu est refusé sans ordre. L'accès à votre compte et les produits disponibles doivent être vérifiés avec votre clé. Les tests automatisés utilisent des réponses fictives et ne prouvent pas qu'un ordre réel fonctionne sur votre compte.
 
 **Pour le site accessible depuis GitHub**, suivez [le guide de déploiement](DEPLOYMENT.md). GitHub Pages héberge l'interface ; le backend HTTPS conserve la clé et exécute les appels Bitpanda. L'offre gratuite comporte des quotas ; les frais Bitpanda restent distincts. Le laboratoire Python n'est pas fourni par le Worker gratuit et est désactivé dans l'interface quand ce backend est connecté.
 
@@ -15,7 +15,7 @@ Lancez `python3 web.py` depuis le dossier du dépôt, puis ouvrez le port local 
 | Écran | Contenu |
 | --- | --- |
 | **Portefeuille** | Valeur totale, nombre de positions, état du trading et plafond ; positions avec symbole, quantité, valeur et répartition. |
-| **Trader** | Achat/vente, recherche d'actif, prix indicatif (`/assets/{id}/ticker`), montant en devise, devis avec compte à rebours puis confirmation explicite. |
+| **Trader** | Achat/vente, recherche d'actif, prix indicatif (`/v1/tickers/{id}`), montant en devise, devis avec compte à rebours puis confirmation explicite. |
 | **Historique** | Journal des ordres de l'application avec rapprochement, et opérations Bitpanda paginées. |
 | **Laboratoire** | Backtest CSV (glisser-déposer), graphique interactif avec achats/ventes, export JSON. |
 | **Connexion** | Adresse du serveur, code d'accès et liste de contrôle de la configuration. |
@@ -26,7 +26,7 @@ Par défaut le serveur reste local : écoute sur `127.0.0.1` ou `localhost`, con
 
 ### Connecter Bitpanda
 
-Dans les paramètres sécurisés de l'environnement, ajoutez la clé créée dans [Bitpanda, onglet Bitpanda des clés API](https://app.bitpanda.com/my-account/apikey). Ne collez jamais la clé dans le code, le navigateur, le chat ou une commande conservée dans l'historique. Utilisez uniquement les permissions nécessaires ; aucun transfert ni retrait n'est implémenté.
+Dans les paramètres sécurisés de l'environnement, ajoutez la clé créée dans [Bitpanda, onglet Bitpanda des clés API](https://app.bitpanda.com/my-account/apikey). Ne collez jamais la clé dans le code, le navigateur, le chat ou une commande conservée dans l'historique. Utilisez uniquement les permissions nécessaires ; aucun transfert ni retrait n'est implémenté. Le portefeuille demande la permission de lecture des soldes (« Balances »), l'historique celle des opérations (« Transaction ») et les ordres celle de trading. Une réponse `401 Credentials / Access token wrong` sur le portefeuille alors que les actifs s'affichent indique en général une clé sans la bonne permission ou une ancienne clé : recréez-en une sur la page des clés API.
 
 | Paramètre | Utilisation |
 | --- | --- |
@@ -39,7 +39,7 @@ Autorisez la destination HTTPS `api.public.bitpanda.com` dans le réseau de l'en
 
 Commencez avec le trading désactivé : le compte est lu automatiquement à la connexion (bouton « Actualiser » ensuite) ; vérifiez que votre portefeuille réel s'affiche. Configurez votre devise et votre plafond puis activez le trading si vous souhaitez utiliser les ordres. Dans « Trader », choisissez achat ou vente, recherchez un symbole, sélectionnez l'actif exact et la devise, puis saisissez un montant **en devise** (virgule ou point décimal acceptés). L'API accepte ce montant (`notional`) pour les deux sens ; les quantités sont fournies par le devis.
 
-« Obtenir un devis » appelle `POST /rfq/quotes` sans exécution. Vérifiez l'actif, la devise, le sens, le montant, le prix, la quantité et l'expiration. Cochez la confirmation puis cliquez sur « Exécuter l'ordre réel » : ce bouton appelle `POST /rfq/quotes/{id}/accept` et peut engager votre argent. Les devis expirés sont refusés. Le plafond porte sur le montant `notional` du devis ; ne supposez pas qu'il couvre des coûts supplémentaires non décrits par la réponse API.
+« Obtenir un devis » appelle `POST /v1/quotes` sans exécution. Vérifiez l'actif, la devise, le sens, le montant, le prix, la quantité et l'expiration. Cochez la confirmation puis cliquez sur « Exécuter l'ordre réel » : ce bouton appelle `POST /v1/quotes/{id}/accept` et peut engager votre argent. Le prix affiché est le prix prime incluse (`price_with_premium`) fourni par le devis. Les devis expirés sont refusés. Le plafond porte sur le montant `notional` du devis ; ne supposez pas qu'il couvre des coûts supplémentaires non décrits par la réponse API.
 
 Les types d'actifs disponibles dépendent du compte et de l'API : l'application ne promet pas l'accès à tous les marchés. Les schémas publics des devises et opérations sont peu détaillés ; une réponse non reconnue est signalée, sans inventer de données. Les opérations affichées sont une première page (50 au maximum) ; l'historique complet reste accessible sur Bitpanda.
 

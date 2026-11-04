@@ -96,4 +96,4 @@ Les tests couvrent le code du Worker avec une API fictive et SQLite local. La co
 
 ## Vérifier le déploiement depuis le dépôt
 
-Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les 19 tests hors ligne. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.
+Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les 21 tests hors ligne. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.

@@ -26,6 +26,31 @@ function expires(value) {
   if (typeof value !== 'string' || !/(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Failure('Expiration du devis invalide.', 502);
   return Date.parse(value);
 }
+function pick(object, ...names) {
+  if (!object || typeof object !== 'object' || Array.isArray(object)) return undefined;
+  for (const name of names) if (object[name] !== undefined && object[name] !== null) return object[name];
+  return undefined;
+}
+function decimalText(value) {
+  // Numbers are accepted only when their text form is a plain decimal.
+  return typeof value === 'number' && Number.isFinite(value) && !/e/i.test(String(value)) ? String(value) : value;
+}
+// Production answers {data: {quote_id, side, asset_id, currency_id, quote: {...}}};
+// the docs also show camelCase and flat variants. All are mapped to one shape.
+export function normalizeQuote(raw) {
+  const data = raw && typeof raw === 'object' && raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data) ? raw.data : raw;
+  const inner = pick(data, 'quote') && typeof data.quote === 'object' ? data.quote : data;
+  const field = (...names) => pick(inner, ...names) ?? pick(data, ...names);
+  const side = field('side');
+  return {
+    id: pick(data, 'quote_id', 'quoteId', 'id') ?? pick(inner, 'quote_id', 'quoteId', 'id'),
+    assetId: field('asset_id', 'assetId'), currencyId: field('currency_id', 'currencyId'),
+    side: typeof side === 'string' ? side.toUpperCase() : side,
+    price: decimalText(field('price_with_premium', 'priceWithPremium', 'price')),
+    quantity: decimalText(field('quantity')), notional: decimalText(field('notional')),
+    expiresAt: field('expires_at', 'expiresAt'),
+  };
+}
 function exactFields(data, fields) {
   if (!data || Array.isArray(data) || typeof data !== 'object' || Object.keys(data).sort().join(',') !== fields.sort().join(',')) throw new Failure('Paramètres manquants ou inconnus.');
 }
@@ -62,7 +87,7 @@ function upstreamDetail(raw) {
   for (const key of ['message', 'error', 'detail', 'title', 'errors']) {
     let value = data[key];
     if (Array.isArray(value)) value = value[0];
-    if (value && typeof value === 'object') value = value.message || value.detail || value.code;
+    if (value && typeof value === 'object') value = value.message || value.detail || value.title || value.code;
     if (typeof value === 'string' && value.trim()) return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
   }
   return '';
@@ -143,11 +168,15 @@ export function createWorker(transport = fetch, now = Date.now) {
     const claim = await db.prepare("UPDATE gate SET owner=?,phase='requesting',release_at=? WHERE id=1 AND (phase='idle' OR (phase IN ('pending','requesting') AND release_at<=?))").bind(owner, timestamp + REQUEST_LEASE_MS, timestamp).run();
     if (claim.meta.changes !== 1) throw new Failure('Un devis est actif ou un ordre est à rapprocher avec Bitpanda. Nouvel ordre bloqué.', 409);
     try {
-      const raw = await upstream(env, 'POST', '/rfq/quotes', payload);
-      if (!raw || typeof raw !== 'object') throw new Failure('Devis Bitpanda invalide.', 502);
-      const id = uuid(raw.id), assetId = uuid(raw.assetId), currencyId = uuid(raw.currencyId);
+      const response = await upstream(env, 'POST', '/v1/quotes', {asset_id: payload.assetId, currency_id: payload.currencyId, side: payload.side, notional: payload.notional});
+      if (!response || typeof response !== 'object') throw new Failure('Devis Bitpanda invalide.', 502);
+      const raw = normalizeQuote(response);
+      let id, assetId, currencyId;
+      try { id = uuid(raw.id); assetId = uuid(raw.assetId); currencyId = uuid(raw.currencyId); }
+      catch { throw new Failure('Devis Bitpanda incomplet ou dans un format inconnu. Aucun ordre envoyé.', 502); }
       if (assetId !== payload.assetId || currencyId !== payload.currencyId || raw.side !== payload.side || decimal(raw.notional) !== requested || decimal(raw.notional) > limit) throw new Failure('Le devis ne correspond pas à la demande.', 502);
-      decimal(raw.price); decimal(raw.quantity);
+      try { decimal(raw.price); decimal(raw.quantity); }
+      catch { throw new Failure('Prix ou quantité du devis illisible. Aucun ordre envoyé.', 502); }
       const expiry = expires(raw.expiresAt);
       if (expiry <= now()) throw new Failure('Devis déjà expiré.', 409);
       const result = {id, assetId, currencyId, side: raw.side, notional: raw.notional, price: raw.price, quantity: raw.quantity, expiresAt: raw.expiresAt};
@@ -182,7 +211,7 @@ export function createWorker(transport = fetch, now = Date.now) {
     ]);
     if (claimed[0].meta.changes !== 1 || claimed[1].meta.changes !== 1) throw new Failure('Ordre déjà envoyé ou journal bloqué. Aucun renvoi.', 409);
     // Durable claim precedes the financial call: crashes and double clicks cannot resend it.
-    try { await upstream(env, 'POST', `/rfq/quotes/${id}/accept`); }
+    try { await upstream(env, 'POST', `/v1/quotes/${id}/accept`); }
     catch (failure) {
       await db.batch([
         db.prepare("UPDATE orders SET state='unknown' WHERE id=? AND state='submitted'").bind(id),
@@ -252,16 +281,16 @@ export function createWorker(transport = fetch, now = Date.now) {
         if (request.method === 'GET' && url.pathname === '/api/bitpanda/ticker') {
           const keys = [...url.searchParams.keys()];
           if (keys.length !== 1 || keys[0] !== 'assetId') throw new Failure('Paramètres de recherche invalides.');
-          return reply(200, {result: await upstream(env, 'GET', `/assets/${uuid(url.searchParams.get('assetId'))}/ticker`)});
+          return reply(200, {result: await upstream(env, 'GET', `/v1/tickers/${uuid(url.searchParams.get('assetId'))}`)});
         }
-        const reads = {'/api/bitpanda/assets': ['/assets', ['symbol', 'cursor', 'id']], '/api/bitpanda/currencies': ['/currencies', []], '/api/bitpanda/holdings': ['/portfolio/holdings', []], '/api/bitpanda/operations': ['/operations', ['cursor']]};
+        const reads = {'/api/bitpanda/assets': ['/v1/assets', ['symbol', 'cursor', 'id']], '/api/bitpanda/currencies': ['/v1/currencies', []], '/api/bitpanda/holdings': ['/v1/portfolio', []], '/api/bitpanda/operations': ['/v1/operations', ['cursor']]};
         if (request.method === 'GET' && reads[url.pathname]) {
           const [path, permitted] = reads[url.pathname], query = new URLSearchParams();
           for (const [name, value] of url.searchParams) {
             if (!permitted.includes(name) || value.length > 200 || query.has(name)) throw new Failure('Paramètres de recherche invalides.');
             query.set(name, name === 'id' ? uuid(value) : value);
           }
-          if (permitted.length) query.set('pageSize', '50');
+          if (permitted.length) query.set('page_size', '50');
           return reply(200, {result: await upstream(env, 'GET', path + (query.size ? '?' + query : ''))});
         }
         if (request.method === 'POST' && url.pathname === '/api/backtest') throw new Failure('Ce serveur gratuit fournit l’espace Bitpanda. Le laboratoire Python nécessite un serveur Python.', 501);

@@ -67,7 +67,7 @@ class WebTests(unittest.TestCase):
             with urlopen(self.base + '/api/bitpanda/ticker?assetId=' + asset, timeout=5) as response:
                 self.assertEqual(json.load(response)['result'], {'price': '1'})
             with urlopen(self.base + '/api/bitpanda/assets?id=' + asset.upper(), timeout=5) as response:
-                client.read.assert_called_with('assets', {'id': asset, 'pageSize': 50})
+                client.read.assert_called_with('assets', {'id': asset, 'page_size': 50})
             for path in ('/api/bitpanda/assets?id=nope', '/api/bitpanda/ticker?foo=1', '/api/bitpanda/journal?x=1'):
                 with self.assertRaises(HTTPError) as error:
                     urlopen(self.base + path, timeout=5)
@@ -128,4 +128,4 @@ class WebTests(unittest.TestCase):
                 result = live_post('/api/bitpanda/accept', dict(quote_id=quote_id,
                     confirmation_token=quote['confirmation_token'], confirm_real_order=True))
                 self.assertEqual(result['state'], 'executed')
-                client.request.assert_called_with('POST', f'/rfq/quotes/{quote_id}/accept')
+                client.request.assert_called_with('POST', f'/v1/quotes/{quote_id}/accept')

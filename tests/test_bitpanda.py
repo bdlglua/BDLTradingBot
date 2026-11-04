@@ -28,8 +28,15 @@ class FakeBitpanda:
             if self.fail_accept:
                 raise BrokerError('Timeout fictif.', 502)
             return {'id': 'fake-operation'}
-        return {**body, 'id': QUOTE, 'price': '50000', 'quantity': '0.002',
-                'expiresAt': (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(), **self.overrides}
+        # Format documented for production: snake_case, wrapped in data, prices in a nested quote.
+        assert set(body) == {'asset_id', 'currency_id', 'side', 'notional'}, body
+        data = {'quote_id': QUOTE, 'status': 'OPEN', 'side': body['side'], 'asset_id': body['asset_id'],
+                'currency_id': body['currency_id'], 'quote': {
+                    'price': '49900', 'price_with_premium': '50000', 'premium': '100', 'quantity': '0.002',
+                    'notional': body['notional'],
+                    'expires_at': (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()}}
+        data.update(self.overrides)
+        return {'data': data}
 
 
 class TradingTests(unittest.TestCase):
@@ -48,7 +55,7 @@ class TradingTests(unittest.TestCase):
 
     def test_quote_does_not_execute_and_confirmation_is_single_use(self):
         quote = self.service.quote(self.request)
-        self.assertEqual([path for _, path, _ in self.client.calls], ['/rfq/quotes'])
+        self.assertEqual([path for _, path, _ in self.client.calls], ['/v1/quotes'])
         self.assertEqual(self.service.accept(self.confirmation(quote))['state'], 'executed')
         restarted = TradingService(self.client, self.database, self.environment)
         with self.assertRaises(BrokerError):
@@ -155,11 +162,11 @@ class TradingTests(unittest.TestCase):
         with self.assertRaises(BrokerError):
             self.service.reconcile(body)
         self.client.fail_accept = False
-        self.client.overrides = {'id': '44444444-4444-4444-8444-444444444444'}
+        self.client.overrides = {'quote_id': '44444444-4444-4444-8444-444444444444'}
         self.assertEqual(self.service.quote(self.request)['quote']['id'], '44444444-4444-4444-8444-444444444444')
 
     def test_quote_accepts_uppercase_uuids_from_bitpanda(self):
-        self.client.overrides = {'assetId': ASSET.upper(), 'currencyId': CURRENCY.upper()}
+        self.client.overrides = {'asset_id': ASSET.upper(), 'currency_id': CURRENCY.upper()}
         result = self.service.quote(self.request)
         self.assertEqual(result['quote']['assetId'], ASSET)
 
@@ -173,3 +180,13 @@ class TradingTests(unittest.TestCase):
         self.assertEqual(upstream_detail(b'{"errors": [{"detail": "Quote expired"}]}'), 'Quote expired')
         self.assertEqual(upstream_detail(b'<html>'), '')
         self.assertEqual(len(upstream_detail(('{"error": "%s"}' % ('x' * 500)).encode())), 200)
+
+    def test_quote_price_includes_premium_and_unknown_format_is_refused(self):
+        quote = self.service.quote(self.request)['quote']
+        self.assertEqual((quote['price'], quote['quantity'], quote['notional']), ('50000', '0.002', '100'))
+        self.assertEqual(self.client.calls[0][2], dict(asset_id=ASSET, currency_id=CURRENCY, side='BUY', notional='100'))
+        other = TradingService(FakeBitpanda(), Path(self.temp.name) / 'other.sqlite3', self.environment)
+        other.client.overrides = {'quote_id': None}
+        with self.assertRaisesRegex(BrokerError, 'format inconnu'):
+            other.quote(self.request)
+        self.assertEqual(other.journal(), [])
