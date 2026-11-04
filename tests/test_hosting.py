@@ -27,6 +27,21 @@ class PagesBuildTests(unittest.TestCase):
             self.assertNotIn('href="/', (site/'index.html').read_text())
             self.assertNotIn('src="/', (site/'index.html').read_text())
 
+    def test_assets_are_versioned_by_content(self):
+        import re
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory)/'a', Path(directory)/'b'
+            build(first, 'https://api.example.com')
+            build(second, 'https://other.example.com')
+            pages = [(site/'index.html').read_text() for site in (first, second)]
+            for page in pages:
+                for name in ('style.css', 'app.js', 'config.js', 'favicon.svg'):
+                    self.assertRegex(page, re.escape(f'"./{name}?v=') + '[0-9a-f]{12}"')
+            config_version = lambda page: re.search(r'config\.js\?v=([0-9a-f]+)', page).group(1)
+            app_version = lambda page: re.search(r'app\.js\?v=([0-9a-f]+)', page).group(1)
+            self.assertNotEqual(config_version(pages[0]), config_version(pages[1]))
+            self.assertEqual(app_version(pages[0]), app_version(pages[1]))
+
     def test_reject_insecure_or_credential_bearing_api_url(self):
         for url in ('http://api.example.com', 'https://token@api.example.com',
                     'https://api.example.com/?token=secret', 'https://api.example.com/path'):
