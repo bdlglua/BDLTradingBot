@@ -181,22 +181,30 @@ async function resolveAssets(ids) {
 }
 async function refreshAccount() {
   clearError(); $('refresh').disabled = true;
+  const problems = [];
   try {
     await loadStatus();
-    const currencies = rows((await api('/api/bitpanda/currencies')).result);
-    state.currencies.clear();
-    for (const currency of currencies) if (currency?.id) state.currencies.set(normalizeId(currency.id), currency.symbol || currency.code || currency.name || 'Devise');
-    renderCurrencies();
-    state.holdings = rows((await api('/api/bitpanda/holdings')).result);
-    state.accountRead = true;
-    $('holdings-status').textContent = `Actualisé à ${new Date().toLocaleTimeString('fr-FR')} · valeurs fournies par Bitpanda`;
+    // Currencies only label amounts: their failure must not hide the portfolio.
+    try {
+      const currencies = rows((await api('/api/bitpanda/currencies')).result);
+      state.currencies.clear();
+      for (const currency of currencies) if (currency?.id) state.currencies.set(normalizeId(currency.id), currency.symbol || currency.code || currency.name || 'Devise');
+      renderCurrencies();
+    } catch (error) { problems.push(`Devises : ${error.message}`); }
+    try {
+      state.holdings = rows((await api('/api/bitpanda/holdings')).result);
+      state.accountRead = true;
+      $('holdings-status').textContent = `Actualisé à ${new Date().toLocaleTimeString('fr-FR')} · valeurs fournies par Bitpanda`;
+    } catch (error) { problems.push(`Portefeuille : ${error.message}`); }
     renderStatus(); renderHoldings();
+    if (!state.accountRead) setCheck('account', 'error');
     await loadJournal();
     resolveAssets([...state.holdings.map(item => item.assetId), ...state.orders.map(order => order.quote?.assetId)]);
   } catch (error) {
-    showError(error.message);
+    problems.push(error.message);
     setCheck('account', 'error');
   } finally { $('refresh').disabled = !state.connected; }
+  if (problems.length) showError(problems.join(' · '));
 }
 $('refresh').addEventListener('click', () => { refreshAccount(); if (state.operations.length) loadOperations(false); });
 
@@ -493,6 +501,7 @@ $('server-form').addEventListener('submit', async event => {
     setResult('server-message', 'Serveur connecté. Lecture du compte Bitpanda…', 'ok');
     await refreshAccount();
     if (state.accountRead) { setResult('server-message', 'Serveur connecté et compte Bitpanda lu.', 'ok'); toast('Compte Bitpanda connecté.'); }
+    else setResult('server-message', 'Serveur connecté, mais le compte Bitpanda n’a pas pu être lu : voir le message en haut de page.', 'error');
   } catch (error) {
     resetData(); setPill('error', 'Échec de connexion');
     setResult('server-message', error.message, 'error');

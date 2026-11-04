@@ -41,7 +41,8 @@ function fixture(t) {
   const state = {now: Date.now(), calls: [], failAccept: false, failStore: false, overrides: {}};
   const transport = async (url, options) => {
     assert.ok(url.startsWith('https://api.public.bitpanda.com/'));
-    assert.equal(options.redirect, 'error');
+    assert.equal(options.redirect, 'manual');
+    if (state.respond) return state.respond(url, options);
     assert.equal(options.headers['x-api-key'], env.BITPANDA_API_KEY);
     state.calls.push({url, options});
     if (url.endsWith('/accept')) {
@@ -217,4 +218,19 @@ test('prix indicatif, recherche par UUID et détail d’erreur Bitpanda', async 
   assert.equal((await f.call('/api/bitpanda/assets?id=nope')).status, 400);
   f.env.BITPANDA_TRADING_CURRENCY_ID = CURRENCY.toUpperCase();
   assert.equal((await f.call('/api/bitpanda/status')).body.currency_id, CURRENCY);
+});
+test('échec réseau, délai et redirection Bitpanda : cause et route indiquées, clé jamais renvoyée', async t => {
+  const f = fixture(t);
+  f.state.respond = async () => { throw Object.assign(new Error('The operation was aborted due to timeout'), {name: 'TimeoutError'}); };
+  let result = await f.call('/api/bitpanda/currencies');
+  assert.equal(result.status, 502); assert.match(result.body.error, /GET \/currencies, délai de 15 s dépassé/);
+  f.state.respond = async () => { throw new TypeError('fetch failed'); };
+  assert.match((await f.call('/api/bitpanda/holdings')).body.error, /GET \/portfolio\/holdings, erreur réseau : fetch failed/);
+  const redirected = [];
+  f.state.respond = async url => { redirected.push(url); return new Response(null, {status: 301, headers: {Location: 'https://elsewhere.example/currencies?key=x'}}); };
+  result = await f.call('/api/bitpanda/currencies');
+  assert.match(result.body.error, /redirigé GET \/currencies vers https:\/\/elsewhere\.example\/currencies \(HTTP 301\)/);
+  assert.ok(!result.body.error.includes('key=x')); assert.equal(redirected.length, 1);
+  f.state.respond = async () => Response.json({message: 'Invalid API key'}, {status: 401});
+  assert.equal((await f.call('/api/bitpanda/holdings')).body.error, 'Clé Bitpanda refusée. [GET /portfolio/holdings] Détail : Invalid API key');
 });

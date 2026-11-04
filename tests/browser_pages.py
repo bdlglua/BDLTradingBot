@@ -46,7 +46,9 @@ def main():
                                 'journal_available': False, 'features': {'backtest': False, 'reconcile': True}}
                     elif path == '/api/bitpanda/journal':
                         status, data = 503, {'error': 'Base D1 persistante non connectée.'}
-                    elif path in ('/api/bitpanda/currencies', '/api/bitpanda/holdings'):
+                    elif path == '/api/bitpanda/currencies':
+                        status, data = 502, {'error': 'Bitpanda injoignable (GET /currencies, délai de 15 s dépassé).'}
+                    elif path == '/api/bitpanda/holdings':
                         data = {'result': []}
                     else:
                         raise AssertionError('Unexpected remote request: '+path)
@@ -68,6 +70,8 @@ def main():
                 page.locator('#server-token').fill(token)
                 page.locator('#server-connect').click()
                 expect(page.locator('#server-message')).to_contain_text('compte Bitpanda lu')
+                # Une liste de devises indisponible n'empêche pas la lecture du portefeuille.
+                expect(page.locator('#alert-text')).to_contain_text('Devises : Bitpanda injoignable (GET /currencies')
                 assert page.locator('#server-token').input_value() == ''
                 expect(page.locator('[data-check="journal"]')).to_have_attribute('data-state', 'error')
                 expect(page.locator('[data-check="account"]')).to_have_attribute('data-state', 'ok')
