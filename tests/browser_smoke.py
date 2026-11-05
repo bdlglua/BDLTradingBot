@@ -68,7 +68,7 @@ def main():
             page.emulate_media(color_scheme='dark')
             page.screenshot(path=str(SHOTS / 'bdl-lab-desktop-dark.png'), full_page=True)
             page.set_viewport_size({'width': 390, 'height': 844})
-            for view in ('overview', 'trade', 'history', 'lab', 'settings'):
+            for view in ('overview', 'trade', 'bot', 'history', 'lab', 'settings'):
                 page.goto(f'{url}/#{view}')
                 page.locator(f'#view-{view}').wait_for(state='visible')
                 assert no_horizontal_scroll(page), view
@@ -87,7 +87,7 @@ def main():
                 path, query = parts.path.split('/api/bitpanda/')[1], parse_qs(parts.query)
                 if path == 'status':
                     response = dict(api_key_present=True, trading_enabled=True, reason='', currency_id=CURRENCY,
-                                    max_order_amount='100', features={'backtest': True, 'reconcile': True})
+                                    max_order_amount='100', features={'backtest': True, 'reconcile': True, 'bot': True})
                 elif path == 'holdings':
                     # GET /v1/portfolio : snake_case documenté, et variante camelCase.
                     eth = '55555555-5555-4555-8555-555555555555'
@@ -132,6 +132,26 @@ def main():
                     raise AssertionError('Unexpected Bitpanda route: ' + path)
                 route.fulfill(json=response)
             page.route('**/api/bitpanda/**', mock_bitpanda)
+            bot = {'paused': False}
+            control_calls = []
+
+            def mock_bot(route):
+                path = route.request.url.split('/api/bot/')[1]
+                if path == 'control':
+                    control_calls.append(route.request.post_data_json)
+                    bot['paused'] = route.request.post_data_json['paused']
+                    return route.fulfill(json={'paused': bot['paused'], 'message': 'Bot en pause : aucun ordre ne sera passé.'})
+                assert path == 'status', path
+                route.fulfill(json={
+                    'config': dict(mode='paper', fast=6, slow=24, stopLoss=0.05, maxBuysPerDay=3, amount='10', assetId=None, symbol='BTC'),
+                    'config_error': '', 'available': True, 'mode_shown': 'paper', 'paused': bot['paused'],
+                    'pause_reason': 'Mis en pause depuis le tableau de bord.' if bot['paused'] else '',
+                    'state': dict(mode='paper', asset_id=ASSET, position_quantity='0.0002', entry_price='50000', prior_spread=12.5,
+                                  last_run='2026-11-05T08:15:00Z', last_status='Position ouverte, aucun signal de sortie.'),
+                    'samples': 24, 'last_price': '50500', 'last_price_at': '2026-11-05T08:15:00Z', 'fast_average': 50400, 'slow_average': 50100,
+                    'trades': [dict(mode='paper', asset_id=ASSET, side='BUY', price='50000', quantity='0.0002', notional='10',
+                                    reason='crossover', quote_id=None, created='2026-11-05T06:00:00Z')]})
+            page.route('**/api/bot/**', mock_bot)
             page.goto(url)
             expect(page.locator('#connection-label')).to_have_text('Trading activé')
             expect(page.locator('#holdings tr')).to_have_count(2)
@@ -162,6 +182,17 @@ def main():
             page.locator('#accept-quote').click()
             expect(page.locator('#order-result')).to_contain_text('Exécution fictive')
             assert accept_calls == [dict(quote_id=QUOTE, confirmation_token='fake-confirmation', confirm_real_order=True)]
+
+            page.locator('.nav[data-view="bot"]').click()
+            expect(page.locator('#bot-mode')).to_have_text('Simulation')
+            expect(page.locator('#bot-signal')).to_have_text('Haussier')
+            expect(page.locator('#bot-position')).to_contain_text('BTC')
+            expect(page.locator('#bot-trades')).to_contain_text('Croisement')
+            page.screenshot(path=str(SHOTS / 'bdl-bot-desktop.png'), full_page=True)
+            page.locator('#bot-toggle').click()
+            expect(page.locator('#bot-paused')).to_contain_text('pause')
+            expect(page.locator('#bot-toggle')).to_have_text('Relancer le bot')
+            assert control_calls == [{'paused': True}]
 
             page.locator('.nav[data-view="history"]').click()
             expect(page.locator('#live-orders')).to_contain_text('Inconnu')

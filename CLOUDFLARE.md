@@ -8,7 +8,7 @@ D'après la [documentation Workers](https://developers.cloudflare.com/workers/pl
 
 Sur Free, atteindre un quota peut bloquer les requêtes. La [documentation D1](https://developers.cloudflare.com/d1/platform/pricing/#frequently-asked-questions) précise que les requêtes échouent quand les limites gratuites sont atteintes. Restez sur Workers **Free**, sans activer Workers Paid. Les plafonds et conditions de l'offre peuvent évoluer. Les frais de trading de Bitpanda restent applicables.
 
-Ce backend fournit le portefeuille, la recherche d'actifs, les devis et les confirmations d'ordres réels. Le laboratoire CSV Python n'y est pas exécuté ; l'interface le signale. Aucun trading autonome ou stop réel n'est activé.
+Ce backend fournit le portefeuille, la recherche d'actifs, les devis et les confirmations d'ordres réels. Le laboratoire CSV Python n'y est pas exécuté ; l'interface le signale. Le bot automatique (tâche planifiée toutes les 15 minutes) reste arrêté tant que `BOT_MODE` n'est pas défini ; voir la section « Bot automatique » du README avant de l'activer.
 
 ## 1. Créer le compte et le Worker
 
@@ -96,4 +96,4 @@ Les tests couvrent le code du Worker avec une API fictive et SQLite local. La co
 
 ## Vérifier le déploiement depuis le dépôt
 
-Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les 21 tests hors ligne. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.
+Pour le développement, `npm ci` installe la version verrouillée de Wrangler, `npm run check:worker` assemble le Worker en mode `--dry-run` sans publication, et `npm run test:worker` exécute les 27 tests hors ligne. Les dossiers `node_modules`, `.wrangler` et les secrets locaux `.dev.vars` sont ignorés par Git. Ces commandes de vérification ne sont pas nécessaires dans le champ « Commande de build » de Cloudflare, qui peut rester vide.

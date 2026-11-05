@@ -16,6 +16,7 @@ Lancez `python3 web.py` depuis le dossier du dépôt, puis ouvrez le port local 
 | --- | --- |
 | **Portefeuille** | Valeur totale, nombre de positions, état du trading et plafond ; positions avec symbole, quantité, valeur et répartition. |
 | **Trader** | Achat/vente, recherche d'actif, prix indicatif (`/v1/tickers/{id}`), montant en devise, devis avec compte à rebours puis confirmation explicite. |
+| **Bot** | Mode, dernier prix, signal des moyennes, position et transactions du bot automatique ; bouton de pause. |
 | **Historique** | Journal des ordres de l'application avec rapprochement, et opérations Bitpanda paginées. |
 | **Laboratoire** | Backtest CSV (glisser-déposer), graphique interactif avec achats/ventes, export JSON. |
 | **Connexion** | Adresse du serveur, code d'accès et liste de contrôle de la configuration. |
@@ -49,7 +50,28 @@ Le journal SQLite privé `.state/bitpanda.sqlite3` (ou le fichier `bitpanda.sqli
 
 Une acceptation est enregistrée comme envoyée **avant** l'appel distant. Elle n'est jamais renvoyée automatiquement, même après timeout ou redémarrage. Un résultat ambigu devient `unknown` (ou reste `submitted` si le processus s'interrompt) et bloque les nouvelles demandes. Consultez les opérations réelles de Bitpanda, puis cliquez sur « Rapprocher » dans l'Historique et indiquez ce que vous constatez (exécuté ou non exécuté). Le rapprochement n'envoie **aucune** requête à Bitpanda : il met seulement le journal à jour et lève le blocage. Il n'est accepté que 30 secondes après l'expiration du devis, quand celui-ci ne peut plus être exécuté. Ne supprimez jamais le journal pour contourner ce blocage.
 
-Il n'y a pas encore de trading autonome, de stop réel, de boucle de stratégie sur données de marché ni de surveillance continue. Les paramètres de moyennes mobiles, allocation et stop du laboratoire n'agissent **pas** sur les ordres Bitpanda.
+Les paramètres saisis dans le laboratoire n'agissent **pas** sur les ordres Bitpanda. Le trading automatique est réglé séparément, par les variables du Worker décrites ci-dessous.
+
+### Bot automatique (Worker Cloudflare)
+
+Le Worker exécute un cycle toutes les 15 minutes (tâche planifiée `*/15 * * * *` de `wrangler.jsonc`). Il est **arrêté par défaut** : rien ne se passe tant que `BOT_MODE` vaut `off` ou n'est pas défini. Le serveur Python ne l'exécute pas.
+
+À chaque cycle, le bot relève le prix de l'actif (`GET /v1/tickers/{id}`), le conserve dans D1 (500 derniers relevés) et applique la stratégie du laboratoire : achat quand la moyenne rapide croise au-dessus de la moyenne lente, vente au croisement inverse ou quand le prix passe sous le stop de sortie. Il ne détient qu'une position à la fois, sans levier ni vente à découvert. Un croisement n'est prise en compte qu'une fois les relevés suffisants collectés (6 h avec les réglages par défaut).
+
+| Variable (type Text) | Rôle | Défaut |
+| --- | --- | --- |
+| `BOT_MODE` | `off`, `paper` (simulation : prix réels, achats et ventes fictifs, aucun devis) ou `live` (ordres réels) | `off` |
+| `BOT_ASSET_SYMBOL` / `BOT_ASSET_ID` | Actif suivi ; l'UUID évite toute ambiguïté de symbole | `BTC` |
+| `BOT_ORDER_AMOUNT` | Montant de chaque achat, dans la devise de trading ; doit rester ≤ `BITPANDA_MAX_ORDER_AMOUNT` | `10` |
+| `BOT_FAST_PERIOD` / `BOT_SLOW_PERIOD` | Périodes des moyennes, en nombre de relevés de 15 min | `6` / `24` |
+| `BOT_STOP_LOSS_PERCENT` | Stop de sortie sous le prix d'entrée, vérifié à chaque cycle | `5` |
+| `BOT_MAX_BUYS_PER_DAY` | Nombre maximal d'achats par jour (UTC) ; les ventes ne sont jamais bloquées | `3` |
+
+En mode `live`, le trading réel doit être activé (`BITPANDA_ENABLE_TRADING`, devise et plafond). Chaque ordre passe par le même verrou et le même journal D1 que les ordres manuels, avec la mention `origin: bot`. Les achats utilisent le montant fixe ; la sortie revend **exactement la quantité achetée** par le bot (seule exception au plafond, puisqu'elle réduit l'exposition). Le bot ne gère que sa propre position : il ne vend jamais les actifs que vous déteniez déjà.
+
+Garde-fous : si une acceptation échoue ou reste incertaine, le bot se met en pause et l'ordre est à rapprocher dans l'Historique ; il ne renvoie jamais un ordre. Si l'ordre s'avère exécuté, le bot ne le sait pas : vérifiez votre position avant de le relancer. Le bouton « Mettre en pause » de l'onglet Bot bloque tout nouvel ordre ; passer `BOT_MODE` à `off` l'arrête complètement. Ne recopiez pas `BOT_MODE` dans `wrangler.jsonc` : la variable du tableau de bord reste votre interrupteur.
+
+Commencez en `paper` pendant plusieurs jours. Le stop est vérifié toutes les 15 minutes au prix du ticker : il ne garantit pas une perte maximale. Les frais, la prime du devis et la fiscalité réduisent les résultats ; les performances simulées ou passées ne garantissent rien.
 
 ### Ligne de commande et tests
 

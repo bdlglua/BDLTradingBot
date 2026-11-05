@@ -6,7 +6,7 @@ L'interface se trouve sur `https://bdlglua.github.io/BDLTradingBot/`. GitHub Pag
 
 Suivez [CLOUDFLARE.md](CLOUDFLARE.md). Un Worker JavaScript traite les requêtes HTTPS et la base D1 conserve le journal des ordres entre exécutions. Le forfait Workers **Free** inclut des quotas, sans abonnement payant requis pour ce montage. N'activez pas Workers Paid pour suivre ce guide.
 
-Le backend gratuit fournit les lectures Bitpanda, les devis et les confirmations manuelles. Il ne fournit pas le laboratoire Python : ce point est indiqué dans l'interface. Aucun robot autonome ni stop réel n'est lancé.
+Le backend gratuit fournit les lectures Bitpanda, les devis et les confirmations manuelles. Il ne fournit pas le laboratoire Python : ce point est indiqué dans l'interface. Il contient aussi un bot automatique, arrêté par défaut ; voir le README.
 
 L'ancien Blueprint Render payant a été retiré. Aucune ressource d'hébergement n'est créée par les fichiers du dépôt. Les frais éventuels de transactions Bitpanda restent distincts de l'hébergement.
 
@@ -35,6 +35,6 @@ node --check static/app.js
 python3 tools/build_pages.py
 ```
 
-Les 21 tests Workers utilisent une API Bitpanda fictive et un véritable moteur SQLite pour vérifier le SQL de D1. Ils ne prouvent pas qu'un Worker distant a été déployé ou qu'un compte réel est accessible. Node 24 est requis pour ces tests, pas pour utiliser le site.
+Les 27 tests Workers utilisent une API Bitpanda fictive et un véritable moteur SQLite pour vérifier le SQL de D1. Ils ne prouvent pas qu'un Worker distant a été déployé ou qu'un compte réel est accessible. Node 24 est requis pour ces tests, pas pour utiliser le site.
 
 Tests facultatifs avec Playwright et Chromium : `python3 tests/browser_smoke.py` et `python3 tests/browser_pages.py`. Pour tester le backend Python dans un moteur Docker Linux local, construisez `docker build -t bdltradingbot:pages .`, puis exécutez `python3 tests/docker_smoke.py`. Ces tests ne passent aucun ordre réel.

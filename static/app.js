@@ -8,6 +8,7 @@ const DECIMAL = /^\d{1,16}(?:\.\d{1,18})?$/;
 const VIEWS = {
   overview: ['Bitpanda', 'Portefeuille'],
   trade: ['Bitpanda · Fonds réels', 'Trader'],
+  bot: ['Automatique', 'Bot'],
   history: ['Bitpanda', 'Historique'],
   lab: ['Simulation', 'Laboratoire'],
   settings: ['Configuration', 'Connexion'],
@@ -239,6 +240,7 @@ async function refreshAccount() {
       $('holdings-status').textContent = `Actualisé à ${new Date().toLocaleTimeString('fr-FR')} · valeurs fournies par Bitpanda`;
     } catch (error) { problems.push(`Portefeuille : ${error.message}`); }
     renderStatus(); renderHoldings();
+    if (state.bot) renderBot();
     if (!state.accountRead) setCheck('account', 'error');
     await loadJournal();
     resolveAssets([...state.holdings.map(item => normalizeHolding(item).assetId), ...state.orders.map(order => order.quote?.assetId)]);
@@ -248,7 +250,7 @@ async function refreshAccount() {
   } finally { $('refresh').disabled = !state.connected; }
   if (problems.length) showError(problems.join(' · '));
 }
-$('refresh').addEventListener('click', () => { refreshAccount(); if (state.operations.length) loadOperations(false); });
+$('refresh').addEventListener('click', () => { refreshAccount(); loadBot(); if (state.operations.length) loadOperations(false); });
 
 /* ------------------------------------------------------------------- trade */
 function renderCurrencies() {
@@ -511,12 +513,85 @@ function renderOperations(loaded) {
 $('read-operations').addEventListener('click', () => loadOperations(false));
 $('more-operations').addEventListener('click', () => loadOperations(true));
 
+/* --------------------------------------------------------------------- bot */
+const BOT_MODES = {off: ['Arrêté', ''], paper: ['Simulation', 'positive'], live: ['Réel', 'negative']};
+const BOT_REASONS = {crossover: 'Croisement', stop_loss: 'Stop de sortie'};
+function resetBot(message = 'Connectez votre serveur pour consulter le bot.') {
+  state.bot = null;
+  for (const id of ['bot-mode', 'bot-price', 'bot-signal', 'bot-position']) { $(id).textContent = '—'; $(id).className = ''; }
+  $('bot-toggle').disabled = true; $('bot-paused').hidden = true; $('bot-config').replaceChildren();
+  $('bot-last-run').textContent = 'Aucun cycle exécuté pour le moment.'; setResult('bot-status', '');
+  $('bot-unavailable').textContent = message; $('bot-unavailable').hidden = !message;
+  $('bot-trades').replaceChildren(); emptyRow($('bot-trades'), 7, 'Aucune transaction du bot.');
+}
+async function loadBot() {
+  if (!state.connected) { resetBot(); return; }
+  if (state.status?.features?.bot !== true) { resetBot('Le bot automatique fonctionne uniquement avec le serveur Cloudflare (Worker), qui l’exécute toutes les 15 minutes.'); return; }
+  try { state.bot = await api('/api/bot/status'); renderBot(); }
+  catch (error) { resetBot(`Bot indisponible : ${error.message}`); }
+}
+function renderBot() {
+  const bot = state.bot, config = bot.config, botState = bot.state;
+  $('bot-unavailable').hidden = !bot.config_error && bot.available !== false;
+  $('bot-unavailable').textContent = bot.config_error ? `Configuration du bot invalide : ${bot.config_error}` : bot.available === false ? 'Base D1 non connectée : le bot ne peut pas fonctionner.' : '';
+  const [label, tone] = BOT_MODES[config?.mode] || ['—', ''];
+  $('bot-mode').textContent = label; $('bot-mode').className = tone;
+  $('bot-mode-note').textContent = config ? `BOT_MODE=${config.mode} · actif ${config.assetId ? config.assetId.slice(0, 8) + '…' : config.symbol}` : 'Variable BOT_MODE';
+  $('bot-price').textContent = bot.last_price ? formatAmount(bot.last_price) : '—';
+  $('bot-price-note').textContent = bot.last_price_at ? `Relevé ${formatDate(bot.last_price_at)} · ${bot.samples}/${config?.slow ?? '?'} relevés` : 'Relevé toutes les 15 min';
+  if (bot.fast_average !== undefined && bot.slow_average !== undefined) {
+    const up = bot.fast_average > bot.slow_average;
+    $('bot-signal').textContent = up ? 'Haussier' : 'Baissier'; $('bot-signal').className = up ? 'positive' : 'negative';
+    $('bot-averages').textContent = `Rapide ${formatAmount(bot.fast_average)} · lente ${formatAmount(bot.slow_average)}`;
+  } else {
+    $('bot-signal').textContent = bot.samples ? 'Collecte…' : '—'; $('bot-signal').className = '';
+    $('bot-averages').textContent = config ? `Il faut ${config.slow} relevés (≈ ${Math.ceil(config.slow / 4)} h)` : 'Moyennes rapide / lente';
+  }
+  const holding = botState?.position_quantity;
+  $('bot-position').textContent = holding ? `${formatAmount(holding)} ${config?.symbol || ''}` : 'Aucune';
+  $('bot-entry').textContent = holding ? `Entrée à ${formatAmount(botState.entry_price)}${config ? ` · stop à ${formatAmount(Number(botState.entry_price) * (1 - config.stopLoss))}` : ''}` : `Mode affiché : ${bot.mode_shown === 'live' ? 'réel' : 'simulation'}`;
+  $('bot-last-run').textContent = botState?.last_run ? `Dernier cycle : ${formatDate(botState.last_run)}` : 'Aucun cycle exécuté pour le moment. Le premier a lieu dans les 15 minutes suivant l’activation.';
+  setResult('bot-status', botState?.last_status || '', /^Erreur|refusé|non confirmé/.test(botState?.last_status || '') ? 'error' : '');
+  $('bot-paused').hidden = !bot.paused;
+  $('bot-paused').textContent = bot.paused ? `Bot en pause : aucun ordre ne sera passé. ${bot.pause_reason || ''}` : '';
+  $('bot-toggle').disabled = !config || config.mode === 'off';
+  $('bot-toggle').textContent = bot.paused ? 'Relancer le bot' : 'Mettre en pause';
+  $('bot-toggle').className = 'btn btn-sm ' + (bot.paused ? 'btn-primary' : 'btn-danger');
+  const summary = $('bot-config'); summary.replaceChildren();
+  if (config) {
+    for (const [term, value] of [['Stratégie', `Croisement des moyennes ${config.fast} / ${config.slow} relevés`], ['Montant par achat', money(config.amount, currencyCode(state.status?.currency_id))],
+      ['Stop de sortie', `${formatNumber(config.stopLoss * 100, 2)} %`], ['Achats maximum par jour', String(config.maxBuysPerDay)]]) {
+      summary.append(element('dt', {text: term}), element('dd', {text: value}));
+    }
+  }
+  const tbody = $('bot-trades'); tbody.replaceChildren();
+  if (!bot.trades?.length) { emptyRow(tbody, 7, 'Aucune transaction du bot.'); return; }
+  for (const trade of bot.trades) {
+    const row = tbody.insertRow();
+    row.insertCell().textContent = formatDate(trade.created);
+    row.insertCell().append(element('span', {className: 'tag ' + (trade.mode === 'live' ? 'tag-danger' : 'tag-info'), text: trade.mode === 'live' ? 'Réel' : 'Simulation'}));
+    const side = row.insertCell(); side.textContent = trade.side === 'BUY' ? 'Achat' : 'Vente'; side.className = trade.side === 'BUY' ? 'side-buy' : 'side-sell';
+    for (const value of [trade.price, trade.quantity, trade.notional]) { const cell = row.insertCell(); cell.className = 'num'; cell.textContent = value ? formatAmount(value) : '—'; }
+    row.insertCell().textContent = BOT_REASONS[trade.reason] || trade.reason;
+  }
+}
+$('bot-refresh').addEventListener('click', loadBot);
+$('bot-toggle').addEventListener('click', async () => {
+  if (!state.bot) return;
+  const pause = !state.bot.paused;
+  if (!pause && state.bot.config?.mode === 'live' && !confirm('Relancer le bot en mode réel ? Il pourra passer des ordres avec vos fonds sans nouvelle confirmation.')) return;
+  $('bot-toggle').disabled = true;
+  try { toast((await api('/api/bot/control', {paused: pause})).message); await loadBot(); }
+  catch (error) { showError(error.message); $('bot-toggle').disabled = false; }
+});
+
 /* -------------------------------------------------------------- connection */
 async function connect() {
   state.sessionToken = (await api('/api/session')).csrf_token;
   await loadStatus();
   state.connected = true; renderStatus();
   await loadJournal();
+  loadBot();
 }
 function resetData() {
   state.requests.abort(); state.requests = new AbortController();
@@ -530,7 +605,7 @@ function resetData() {
   $('kpi-value-note').textContent = 'Valeur fournie par Bitpanda';
   $('currency-id').replaceChildren(new Option('Actualisez le compte', ''));
   $('asset-selected').hidden = true; $('asset-search').hidden = false; $('asset-results').hidden = true;
-  setResult('order-result', ''); clearError(); updateAmountSuffix();
+  setResult('order-result', ''); clearError(); updateAmountSuffix(); resetBot();
 }
 $('server-form').addEventListener('submit', async event => {
   event.preventDefault(); if (state.busy) return;
