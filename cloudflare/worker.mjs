@@ -125,6 +125,49 @@ async function jsonBody(request) {
   catch (error) { if (error instanceof Failure) throw error; throw new Failure('JSON invalide.'); }
 }
 
+/* ------------------------------------------------------------------ bot */
+// Automatic trading: moving-average crossover on prices sampled by the cron
+// trigger. Modes: off (default), paper (simulated fills, no Bitpanda order) and
+// live (real orders through the same gate and journal as manual orders).
+const BOT_SCHEMA = [
+  'CREATE TABLE IF NOT EXISTS bot_prices (asset_id TEXT NOT NULL, ts INTEGER NOT NULL, price TEXT NOT NULL, PRIMARY KEY (asset_id, ts))',
+  'CREATE TABLE IF NOT EXISTS bot_state (mode TEXT PRIMARY KEY CHECK (mode IN (\'paper\',\'live\')), asset_id TEXT, position_quantity TEXT, entry_price TEXT, prior_spread REAL, last_run TEXT, last_status TEXT)',
+  'CREATE TABLE IF NOT EXISTS bot_control (id INTEGER PRIMARY KEY CHECK (id = 1), paused INTEGER NOT NULL DEFAULT 0, reason TEXT)',
+  'INSERT OR IGNORE INTO bot_control (id, paused) VALUES (1, 0)',
+  'CREATE TABLE IF NOT EXISTS bot_trades (id TEXT PRIMARY KEY, mode TEXT NOT NULL, asset_id TEXT NOT NULL, side TEXT NOT NULL, price TEXT, quantity TEXT, notional TEXT, reason TEXT NOT NULL, quote_id TEXT, created TEXT NOT NULL)',
+  'CREATE INDEX IF NOT EXISTS bot_trades_created ON bot_trades(mode, created DESC)',
+];
+const BOT_HISTORY = 500;
+function integerSetting(value, fallback, min, max, name) {
+  if (value === undefined || value === '') return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) throw new Failure(`${name} doit être un entier entre ${min} et ${max}.`, 503);
+  return number;
+}
+export function botConfig(env) {
+  const mode = String(env.BOT_MODE || 'off').trim().toLowerCase();
+  if (!['off', 'paper', 'live'].includes(mode)) throw new Failure('BOT_MODE doit valoir off, paper ou live.', 503);
+  const fast = integerSetting(env.BOT_FAST_PERIOD, 6, 1, 499, 'BOT_FAST_PERIOD');
+  const slow = integerSetting(env.BOT_SLOW_PERIOD, 24, 2, 500, 'BOT_SLOW_PERIOD');
+  if (fast >= slow) throw new Failure('BOT_FAST_PERIOD doit être inférieur à BOT_SLOW_PERIOD.', 503);
+  const stopPercent = env.BOT_STOP_LOSS_PERCENT === undefined || env.BOT_STOP_LOSS_PERCENT === '' ? 5 : Number(env.BOT_STOP_LOSS_PERCENT);
+  if (!Number.isFinite(stopPercent) || stopPercent <= 0 || stopPercent >= 100) throw new Failure('BOT_STOP_LOSS_PERCENT doit être compris entre 0 et 100.', 503);
+  const maxBuysPerDay = integerSetting(env.BOT_MAX_BUYS_PER_DAY, 3, 1, 50, 'BOT_MAX_BUYS_PER_DAY');
+  const amount = env.BOT_ORDER_AMOUNT || '10';
+  try { decimal(amount); } catch { throw new Failure('BOT_ORDER_AMOUNT doit être un montant décimal positif.', 503); }
+  let assetId = null;
+  if (env.BOT_ASSET_ID) { try { assetId = uuid(env.BOT_ASSET_ID); } catch { throw new Failure('BOT_ASSET_ID doit être un UUID.', 503); } }
+  const symbol = String(env.BOT_ASSET_SYMBOL || 'BTC').trim().toUpperCase();
+  if (!/^[A-Z0-9.]{1,20}$/.test(symbol)) throw new Failure('BOT_ASSET_SYMBOL invalide.', 503);
+  return {mode, fast, slow, stopLoss: stopPercent / 100, maxBuysPerDay, amount, assetId, symbol};
+}
+const average = values => values.reduce((sum, value) => sum + value, 0) / values.length;
+// Plain decimal text for a computed quantity (never exponential notation).
+function quantityText(value) {
+  const text = value.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
+  return text === '0' ? '0.00000001' : text;
+}
+
 export function createWorker(transport = fetch, now = Date.now) {
   async function upstream(env, method, path, body) {
     if (!env.BITPANDA_API_KEY) throw new Failure('Clé Bitpanda absente des secrets du serveur.', 503);
@@ -163,23 +206,40 @@ export function createWorker(transport = fetch, now = Date.now) {
     const payload = {assetId: uuid(data.assetId), currencyId: uuid(data.currencyId), side: data.side, notional: data.notional};
     const requested = decimal(payload.notional);
     if (!['BUY', 'SELL'].includes(payload.side) || payload.currencyId !== currency || requested > limit) throw new Failure('Sens invalide, devise non autorisée ou plafond dépassé.');
+    return requestQuote(env, payload);
+  }
+  // Shared by manual quotes and the bot. A request carries either a currency
+  // `notional` (capped by the order limit) or, only for the bot's exit, the exact
+  // asset `quantity` it bought: that sale reduces exposure and is not capped.
+  async function requestQuote(env, payload) {
+    const {currency, limit} = policy(env);
+    const byQuantity = payload.quantity !== undefined;
+    const requested = byQuantity ? decimal(payload.quantity) : decimal(payload.notional);
+    if (byQuantity && payload.side !== 'SELL') throw new Failure('Seule la sortie du bot se fait par quantité.');
+    if (payload.currencyId !== currency || (!byQuantity && requested > limit)) throw new Failure('Devise non autorisée ou plafond dépassé.');
     if (!env.BITPANDA_API_KEY) throw new Failure('Clé Bitpanda absente.', 503);
     const db = database(env), owner = crypto.randomUUID(), timestamp = now();
     const claim = await db.prepare("UPDATE gate SET owner=?,phase='requesting',release_at=? WHERE id=1 AND (phase='idle' OR (phase IN ('pending','requesting') AND release_at<=?))").bind(owner, timestamp + REQUEST_LEASE_MS, timestamp).run();
     if (claim.meta.changes !== 1) throw new Failure('Un devis est actif ou un ordre est à rapprocher avec Bitpanda. Nouvel ordre bloqué.', 409);
     try {
-      const response = await upstream(env, 'POST', '/v1/quotes', {asset_id: payload.assetId, currency_id: payload.currencyId, side: payload.side, notional: payload.notional});
+      const body = {asset_id: payload.assetId, currency_id: payload.currencyId, side: payload.side};
+      if (byQuantity) body.quantity = payload.quantity; else body.notional = payload.notional;
+      const response = await upstream(env, 'POST', '/v1/quotes', body);
       if (!response || typeof response !== 'object') throw new Failure('Devis Bitpanda invalide.', 502);
       const raw = normalizeQuote(response);
       let id, assetId, currencyId;
       try { id = uuid(raw.id); assetId = uuid(raw.assetId); currencyId = uuid(raw.currencyId); }
       catch { throw new Failure('Devis Bitpanda incomplet ou dans un format inconnu. Aucun ordre envoyé.', 502); }
-      if (assetId !== payload.assetId || currencyId !== payload.currencyId || raw.side !== payload.side || decimal(raw.notional) !== requested || decimal(raw.notional) > limit) throw new Failure('Le devis ne correspond pas à la demande.', 502);
-      try { decimal(raw.price); decimal(raw.quantity); }
-      catch { throw new Failure('Prix ou quantité du devis illisible. Aucun ordre envoyé.', 502); }
+      let notional, quantity;
+      try { decimal(raw.price); quantity = decimal(raw.quantity); notional = decimal(raw.notional); }
+      catch { throw new Failure('Prix, quantité ou montant du devis illisible. Aucun ordre envoyé.', 502); }
+      const matches = byQuantity ? quantity === requested : notional === requested && notional <= limit;
+      if (assetId !== payload.assetId || currencyId !== payload.currencyId || raw.side !== payload.side || !matches) throw new Failure('Le devis ne correspond pas à la demande.', 502);
       const expiry = expires(raw.expiresAt);
       if (expiry <= now()) throw new Failure('Devis déjà expiré.', 409);
       const result = {id, assetId, currencyId, side: raw.side, notional: raw.notional, price: raw.price, quantity: raw.quantity, expiresAt: raw.expiresAt};
+      if (payload.origin) result.origin = payload.origin;
+      if (byQuantity) result.exit = true;
       const token = randomToken();
       const stored = await db.batch([
         db.prepare("UPDATE orders SET state='expired' WHERE state='pending' AND expires<=?").bind(now()),
@@ -204,7 +264,7 @@ export function createWorker(transport = fetch, now = Date.now) {
     if (row.state !== 'pending') throw new Failure('Ce devis a déjà été traité. Vérifiez le journal.', 409);
     const saved = JSON.parse(row.quote);
     if (row.expires <= now()) throw new Failure('Devis expiré.', 409);
-    if (saved.currencyId !== currency || decimal(saved.notional) > limit) throw new Failure('Le devis dépasse les limites actuelles.');
+    if (saved.currencyId !== currency || (!saved.exit && decimal(saved.notional) > limit)) throw new Failure('Le devis dépasse les limites actuelles.');
     const claimed = await db.batch([
       db.prepare("UPDATE orders SET state='submitted' WHERE id=? AND state='pending' AND EXISTS (SELECT 1 FROM gate WHERE id=1 AND owner=orders.id AND phase='pending')").bind(id),
       db.prepare("UPDATE gate SET phase='submitted',release_at=0 WHERE id=1 AND owner=? AND phase='pending' AND EXISTS (SELECT 1 FROM orders WHERE id=? AND state='submitted')").bind(id, id),
@@ -245,7 +305,168 @@ export function createWorker(transport = fetch, now = Date.now) {
     if (result[0].meta.changes !== 1) throw new Failure('Ce devis a changé d’état. Actualisez le journal.', 409);
     return {quote_id: id, state, message: 'Ordre rapproché. Les nouveaux devis sont de nouveau possibles.'};
   }
+  async function ensureBotSchema(db) {
+    await db.batch(BOT_SCHEMA.map(sql => db.prepare(sql)));
+  }
+  async function botAsset(env, config, state) {
+    if (config.assetId) return config.assetId;
+    if (state?.asset_id) return state.asset_id;
+    const result = await upstream(env, 'GET', `/v1/assets?symbol=${encodeURIComponent(config.symbol)}&page_size=50`);
+    const list = Array.isArray(result) ? result : Array.isArray(result?.data) ? result.data : [];
+    const matches = list.filter(asset => String(pick(asset, 'symbol') || '').toUpperCase() === config.symbol);
+    if (matches.length !== 1) throw new Failure(`Actif ${config.symbol} ${matches.length ? 'ambigu' : 'introuvable'} : définissez BOT_ASSET_ID.`, 503);
+    return uuid(pick(matches[0], 'id', 'asset_id', 'assetId'));
+  }
+  async function botPrice(env, assetId) {
+    const result = await upstream(env, 'GET', `/v1/tickers/${assetId}`);
+    const data = result && typeof result === 'object' && result.data && typeof result.data === 'object' && !Array.isArray(result.data) ? result.data : result;
+    let price = pick(data, 'price', 'last_price', 'lastPrice', 'value');
+    if (price && typeof price === 'object') price = pick(price, 'value', 'amount');
+    price = decimalText(price);
+    try { decimal(price); } catch { throw new Failure('Prix Bitpanda illisible : aucun ordre.', 502); }
+    return price;
+  }
+  async function botSnapshot(db, config, mode) {
+    const state = await db.prepare('SELECT * FROM bot_state WHERE mode=?').bind(mode).first();
+    const control = await db.prepare('SELECT paused, reason FROM bot_control WHERE id=1').first();
+    return {state, control};
+  }
+  async function recordTrade(db, trade) {
+    await db.prepare('INSERT INTO bot_trades (id,mode,asset_id,side,price,quantity,notional,reason,quote_id,created) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .bind(crypto.randomUUID(), trade.mode, trade.assetId, trade.side, trade.price, trade.quantity, trade.notional, trade.reason, trade.quoteId || null, new Date(now()).toISOString()).run();
+  }
+  async function saveState(db, mode, values) {
+    await db.prepare(`INSERT INTO bot_state (mode, asset_id, position_quantity, entry_price, prior_spread, last_run, last_status) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(mode) DO UPDATE SET asset_id=excluded.asset_id, position_quantity=excluded.position_quantity, entry_price=excluded.entry_price,
+      prior_spread=excluded.prior_spread, last_run=excluded.last_run, last_status=excluded.last_status`)
+      .bind(mode, values.asset_id ?? null, values.position_quantity ?? null, values.entry_price ?? null, values.prior_spread ?? null, new Date(now()).toISOString(), values.last_status || '').run();
+  }
+  async function pauseBot(db, reason) {
+    await db.prepare('UPDATE bot_control SET paused=1, reason=? WHERE id=1').bind(reason.slice(0, 300)).run();
+  }
+  // One cycle: sample the price, update the averages and act on a crossover.
+  async function runBot(env) {
+    const config = botConfig(env);
+    if (config.mode === 'off') return {status: 'Bot arrêté (BOT_MODE=off).'};
+    const db = database(env);
+    await ensureBotSchema(db);
+    const {state, control} = await botSnapshot(db, config, config.mode);
+    const assetId = await botAsset(env, config, state);
+    const price = await botPrice(env, assetId), priceNumber = Number(price);
+    const minute = Math.floor(now() / 60000) * 60000;
+    await db.batch([
+      db.prepare('INSERT OR REPLACE INTO bot_prices (asset_id, ts, price) VALUES (?,?,?)').bind(assetId, minute, price),
+      db.prepare('DELETE FROM bot_prices WHERE asset_id=? AND ts NOT IN (SELECT ts FROM bot_prices WHERE asset_id=? ORDER BY ts DESC LIMIT ?)').bind(assetId, assetId, BOT_HISTORY),
+    ]);
+    const history = (await db.prepare('SELECT price FROM bot_prices WHERE asset_id=? ORDER BY ts DESC LIMIT ?').bind(assetId, config.slow).all()).results.map(row => Number(row.price)).reverse();
+    const position = state?.position_quantity && state.asset_id === assetId ? state : null;
+    const base = {asset_id: assetId, position_quantity: position?.position_quantity ?? null, entry_price: position?.entry_price ?? null, prior_spread: state?.asset_id === assetId ? state.prior_spread : null};
+    if (history.length < config.slow) {
+      await saveState(db, config.mode, {...base, last_status: `Collecte des prix : ${history.length}/${config.slow} relevés.`});
+      return {status: 'warming-up', samples: history.length};
+    }
+    const spread = average(history.slice(-config.fast)) - average(history);
+    const prior = base.prior_spread;
+    let action = null;
+    if (position) {
+      if (priceNumber <= Number(position.entry_price) * (1 - config.stopLoss)) action = {side: 'SELL', reason: 'stop_loss'};
+      else if (prior !== null && prior >= 0 && spread < 0) action = {side: 'SELL', reason: 'crossover'};
+    } else if (prior !== null && prior <= 0 && spread > 0) action = {side: 'BUY', reason: 'crossover'};
+    if (control?.paused) {
+      await saveState(db, config.mode, {...base, prior_spread: spread, last_status: `En pause${control.reason ? ` : ${control.reason}` : ''}. Signal ignoré : ${action ? action.side : 'aucun'}.`});
+      return {status: 'paused'};
+    }
+    if (!action) {
+      await saveState(db, config.mode, {...base, prior_spread: spread, last_status: position ? 'Position ouverte, aucun signal de sortie.' : 'Aucun signal d’achat.'});
+      return {status: 'idle'};
+    }
+    if (action.side === 'BUY') {
+      const today = new Date(now()).toISOString().slice(0, 10);
+      const buys = await db.prepare("SELECT COUNT(*) AS n FROM bot_trades WHERE mode=? AND side='BUY' AND created>=?").bind(config.mode, today).first();
+      if ((buys?.n || 0) >= config.maxBuysPerDay) {
+        await saveState(db, config.mode, {...base, prior_spread: spread, last_status: `Signal d’achat ignoré : ${config.maxBuysPerDay} achats déjà faits aujourd’hui.`});
+        return {status: 'capped'};
+      }
+    }
+    if (config.mode === 'paper') {
+      const quantity = action.side === 'BUY' ? quantityText(Number(config.amount) / priceNumber) : position.position_quantity;
+      const notional = action.side === 'BUY' ? config.amount : (Number(quantity) * priceNumber).toFixed(2);
+      await recordTrade(db, {mode: 'paper', assetId, side: action.side, price, quantity, notional, reason: action.reason});
+      await saveState(db, 'paper', {asset_id: assetId, position_quantity: action.side === 'BUY' ? quantity : null, entry_price: action.side === 'BUY' ? price : null,
+        prior_spread: spread, last_status: `Simulation : ${action.side === 'BUY' ? 'achat' : 'vente'} au prix ${price}.`});
+      return {status: 'paper-trade', side: action.side};
+    }
+    // Live: the same gate and journal as manual orders. Any failure pauses the bot
+    // so that a person checks Bitpanda before anything else is sent.
+    const {currency, limit} = policy(env);
+    if (decimal(config.amount) > limit) throw new Failure('BOT_ORDER_AMOUNT dépasse BITPANDA_MAX_ORDER_AMOUNT.', 503);
+    const request = action.side === 'BUY'
+      ? {assetId, currencyId: currency, side: 'BUY', notional: config.amount, origin: 'bot'}
+      : {assetId, currencyId: currency, side: 'SELL', quantity: position.position_quantity, origin: 'bot'};
+    let quoted;
+    try { quoted = await requestQuote(env, request); }
+    catch (error) {
+      // No order was sent: keep running, the next cycle will retry on a new signal.
+      await saveState(db, 'live', {...base, prior_spread: prior, last_status: `Devis refusé, aucun ordre : ${error.message}`});
+      return {status: 'quote-failed'};
+    }
+    try { await accept(env, {quote_id: quoted.quote.id, confirmation_token: quoted.confirmation_token, confirm_real_order: true}); }
+    catch (error) {
+      await pauseBot(db, `Ordre ${action.side} au résultat incertain : vérifiez Bitpanda et rapprochez-le.`);
+      await saveState(db, 'live', {...base, prior_spread: prior, last_status: `Ordre non confirmé, bot en pause : ${error.message}`});
+      return {status: 'paused-after-error'};
+    }
+    const executed = quoted.quote;
+    await recordTrade(db, {mode: 'live', assetId, side: action.side, price: executed.price, quantity: executed.quantity, notional: executed.notional, reason: action.reason, quoteId: executed.id});
+    await saveState(db, 'live', {asset_id: assetId, position_quantity: action.side === 'BUY' ? executed.quantity : null, entry_price: action.side === 'BUY' ? executed.price : null,
+      prior_spread: spread, last_status: `Ordre réel ${action.side === 'BUY' ? 'd’achat' : 'de vente'} exécuté au prix ${executed.price}.`});
+    return {status: 'live-trade', side: action.side};
+  }
+  async function botStatus(env) {
+    let config, configError = '';
+    try { config = botConfig(env); } catch (error) { configError = error.message; }
+    const response = {config: config || null, config_error: configError, available: Boolean(env.DB)};
+    if (!env.DB) return response;
+    const db = database(env);
+    await ensureBotSchema(db);
+    const mode = config && config.mode !== 'off' ? config.mode : 'paper';
+    const {state, control} = await botSnapshot(db, config, mode);
+    response.mode_shown = mode;
+    response.paused = Boolean(control?.paused);
+    response.pause_reason = control?.reason || '';
+    response.state = state || null;
+    if (state?.asset_id && config) {
+      const rows = (await db.prepare('SELECT price, ts FROM bot_prices WHERE asset_id=? ORDER BY ts DESC LIMIT ?').bind(state.asset_id, config.slow).all()).results.reverse();
+      const values = rows.map(row => Number(row.price));
+      response.samples = values.length;
+      response.last_price = rows.at(-1)?.price ?? null;
+      response.last_price_at = rows.length ? new Date(rows.at(-1).ts).toISOString() : null;
+      if (values.length >= config.slow) { response.fast_average = average(values.slice(-config.fast)); response.slow_average = average(values); }
+    }
+    response.trades = (await db.prepare('SELECT mode,asset_id,side,price,quantity,notional,reason,quote_id,created FROM bot_trades ORDER BY created DESC LIMIT 50').all()).results;
+    return response;
+  }
+  async function botControl(env, data) {
+    exactFields(data, ['paused']);
+    if (typeof data.paused !== 'boolean') throw new Failure('Valeur de pause invalide.');
+    const db = database(env);
+    await ensureBotSchema(db);
+    await db.prepare('UPDATE bot_control SET paused=?, reason=? WHERE id=1').bind(data.paused ? 1 : 0, data.paused ? 'Mis en pause depuis le tableau de bord.' : null).run();
+    return {paused: data.paused, message: data.paused ? 'Bot en pause : aucun ordre ne sera passé.' : 'Bot relancé.'};
+  }
   return {
+    async scheduled(controller, env, ctx) {
+      const run = runBot(env).catch(async error => {
+        // Record the failure where the dashboard can show it; never retry an order.
+        try {
+          const config = botConfig(env), db = database(env);
+          if (config.mode !== 'off') await db.prepare('UPDATE bot_state SET last_run=?, last_status=? WHERE mode=?').bind(new Date(now()).toISOString(), `Erreur : ${error.message}`.slice(0, 300), config.mode).run();
+        } catch { /* configuration or database unavailable */ }
+        return {status: 'error', error: error.message};
+      });
+      if (ctx?.waitUntil) ctx.waitUntil(run);
+      return run;
+    },
     async fetch(request, env) {
       const url = new URL(request.url), incomingOrigin = request.headers.get('Origin');
       let allowedOrigin = '';
@@ -272,7 +493,7 @@ export function createWorker(transport = fetch, now = Date.now) {
           try { policy(env); enabled = Boolean(env.BITPANDA_API_KEY && env.DB); } catch (error) { reason = error.message; }
           if (!env.DB) reason = 'Base D1 persistante non connectée.';
           else if (!env.BITPANDA_API_KEY) reason = 'Clé Bitpanda absente.';
-          return reply(200, {broker: 'Bitpanda', api_key_present: Boolean(env.BITPANDA_API_KEY), trading_enabled: enabled, currency_id: enabled ? uuid(env.BITPANDA_TRADING_CURRENCY_ID) : null, max_order_amount: enabled ? env.BITPANDA_MAX_ORDER_AMOUNT : null, reason, connection_verified: false, journal_available: Boolean(env.DB), features: {backtest: false, reconcile: true}});
+          return reply(200, {broker: 'Bitpanda', api_key_present: Boolean(env.BITPANDA_API_KEY), trading_enabled: enabled, currency_id: enabled ? uuid(env.BITPANDA_TRADING_CURRENCY_ID) : null, max_order_amount: enabled ? env.BITPANDA_MAX_ORDER_AMOUNT : null, reason, connection_verified: false, journal_available: Boolean(env.DB), features: {backtest: false, reconcile: true, bot: true}});
         }
         if (request.method === 'GET' && url.pathname === '/api/bitpanda/journal') {
           const result = await database(env).prepare('SELECT id,quote,state,expires,created FROM orders ORDER BY created DESC LIMIT 100').all();
@@ -293,8 +514,9 @@ export function createWorker(transport = fetch, now = Date.now) {
           if (permitted.length) query.set('page_size', '50');
           return reply(200, {result: await upstream(env, 'GET', path + (query.size ? '?' + query : ''))});
         }
+        if (request.method === 'GET' && url.pathname === '/api/bot/status') return reply(200, await botStatus(env));
         if (request.method === 'POST' && url.pathname === '/api/backtest') throw new Failure('Ce serveur gratuit fournit l’espace Bitpanda. Le laboratoire Python nécessite un serveur Python.', 501);
-        const actions = {'/api/bitpanda/quote': quote, '/api/bitpanda/accept': accept, '/api/bitpanda/reconcile': reconcile};
+        const actions = {'/api/bitpanda/quote': quote, '/api/bitpanda/accept': accept, '/api/bitpanda/reconcile': reconcile, '/api/bot/control': botControl};
         if (request.method === 'POST' && Object.hasOwn(actions, url.pathname)) {
           if (!await equal(request.headers.get('X-CSRF-Token'), await csrf(env.DASHBOARD_ACCESS_TOKEN))) throw new Failure('Session invalide. Reconnectez le serveur.', 403);
           const data = await jsonBody(request);

@@ -38,7 +38,7 @@ function fixture(t) {
     DASHBOARD_ACCESS_TOKEN: 'fake-access-code-longer-than-32-characters',
     BITPANDA_API_KEY: 'fake-not-a-real-bitpanda-key', BITPANDA_ENABLE_TRADING: '1',
     BITPANDA_TRADING_CURRENCY_ID: CURRENCY, BITPANDA_MAX_ORDER_AMOUNT: '100'};
-  const state = {now: Date.now(), calls: [], failAccept: false, failStore: false, overrides: {}};
+  const state = {now: Date.now(), calls: [], failAccept: false, failStore: false, overrides: {}, quoteBodies: [], price: '100'};
   const transport = async (url, options) => {
     assert.ok(url.startsWith('https://api.public.bitpanda.com/v1/'));
     assert.equal(options.redirect, 'manual');
@@ -53,12 +53,16 @@ function fixture(t) {
     if (url.endsWith('/v1/quotes')) {
       // Format documented for production: snake_case, wrapped in data, prices in a nested quote.
       const body = JSON.parse(options.body);
-      assert.deepEqual(Object.keys(body).sort(), ['asset_id', 'currency_id', 'notional', 'side']);
+      const amountField = body.quantity !== undefined ? 'quantity' : 'notional';
+      assert.deepEqual(Object.keys(body).sort(), ['asset_id', 'currency_id', amountField, 'side'].sort());
+      state.quoteBodies.push(body);
       const {notional, ...overrides} = state.overrides;
       return Response.json({data: {quote_id: crypto.randomUUID(), status: 'OPEN', side: body.side, asset_id: body.asset_id,
-        currency_id: body.currency_id, quote: {price: '49900', price_with_premium: '50000', premium: '100', quantity: '0.002',
-          notional: notional ?? body.notional, expires_at: new Date(state.now + 60000).toISOString()}, ...overrides}});
+        currency_id: body.currency_id, quote: {price: '49900', price_with_premium: state.quotePrice || '50000', premium: '100',
+          quantity: body.quantity ?? '0.002', notional: notional ?? body.notional ?? '95', expires_at: new Date(state.now + 60000).toISOString()}, ...overrides}});
     }
+    if (url.includes('/v1/tickers/')) return Response.json({data: {asset_id: ASSET, price: state.price, currency: 'EUR'}});
+    if (url.includes('/v1/assets?symbol=')) return Response.json({data: [{id: ASSET, symbol: 'BTC'}, {id: CURRENCY, symbol: 'BTCX'}]});
     return Response.json([]);
   };
   let worker = createWorker(transport, () => state.now);
@@ -83,6 +87,9 @@ function fixture(t) {
   }
   return {db, env, state, call, session, quote, confirmation,
     restart: () => { worker = createWorker(transport, () => state.now); },
+    // One cron cycle, 15 minutes after the previous one, at the given ticker price.
+    tick: async price => { state.price = String(price); state.now += 15 * 60000; return worker.scheduled({}, env, null); },
+    trades: () => db.sqlite.prepare('SELECT * FROM bot_trades ORDER BY created, rowid').all(),
     acceptCalls: () => state.calls.filter(call => call.url.endsWith('/accept')).length};
 }
 
@@ -252,4 +259,79 @@ test('devis dans un format inconnu : refusé sans ordre, verrou libéré', async
   assert.equal(result.status, 502); assert.match(result.body.error, /format inconnu/);
   assert.equal(f.acceptCalls(), 0);
   f.state.overrides = {}; assert.equal((await f.quote()).status, 200);
+});
+
+const BOT = {BOT_FAST_PERIOD: '2', BOT_SLOW_PERIOD: '3', BOT_ORDER_AMOUNT: '10'};
+// Same series as the lab test: crossover up at 12, stop-loss on the drop to 7.
+const SERIES = [10, 9, 8, 12, 13, 14, 7, 6];
+test('bot arrêté par défaut : aucune requête Bitpanda', async t => {
+  const f = fixture(t);
+  assert.equal((await f.tick(100)).status, 'Bot arrêté (BOT_MODE=off).');
+  assert.equal(f.state.calls.length, 0);
+});
+test('bot en simulation : achats et ventes fictifs, aucun devis ni ordre', async t => {
+  const f = fixture(t); Object.assign(f.env, BOT, {BOT_MODE: 'paper'});
+  const statuses = [];
+  for (const price of SERIES) statuses.push((await f.tick(price)).status);
+  assert.deepEqual(statuses.slice(0, 2), ['warming-up', 'warming-up']);
+  assert.ok(f.state.calls.every(call => call.url.includes('/v1/tickers/') || call.url.includes('/v1/assets?symbol=')));
+  const trades = f.trades();
+  assert.deepEqual(trades.map(trade => [trade.mode, trade.side, trade.reason, trade.price]), [['paper', 'BUY', 'crossover', '12'], ['paper', 'SELL', 'stop_loss', '7']]);
+  assert.equal(trades[0].quantity, '0.83333333'); assert.equal(trades[1].quantity, '0.83333333');
+  const status = (await f.call('/api/bot/status')).body;
+  assert.equal(status.config.mode, 'paper'); assert.equal(status.state.position_quantity, null); assert.equal(status.trades.length, 2);
+});
+test('bot réel : achat au montant fixe puis sortie par quantité, via le journal et le verrou', async t => {
+  const f = fixture(t); Object.assign(f.env, BOT, {BOT_MODE: 'live'}); f.state.quotePrice = '12';
+  for (const price of SERIES.slice(0, 4)) await f.tick(price);
+  assert.deepEqual(f.state.quoteBodies[0], {asset_id: ASSET, currency_id: CURRENCY, side: 'BUY', notional: '10'});
+  assert.equal(f.acceptCalls(), 1);
+  let status = (await f.call('/api/bot/status')).body;
+  assert.equal(status.state.position_quantity, '0.002'); assert.equal(status.state.entry_price, '12');
+  for (const price of [13, 14]) await f.tick(price);
+  assert.equal(f.acceptCalls(), 1, 'aucune sortie tant que le prix reste au-dessus du stop');
+  // 7 is below the 5 % stop from the 12 entry: exit by the exact bought quantity.
+  f.state.quotePrice = '7'; await f.tick(7);
+  assert.deepEqual(f.state.quoteBodies.at(-1), {asset_id: ASSET, currency_id: CURRENCY, side: 'SELL', quantity: '0.002'});
+  assert.equal(f.acceptCalls(), 2);
+  const orders = (await f.call('/api/bitpanda/journal')).body.orders;
+  assert.ok(orders.every(order => order.quote.origin === 'bot' && order.state === 'executed'));
+  assert.equal(orders.find(order => order.quote.side === 'SELL').quote.exit, true);
+  assert.deepEqual(f.trades().map(trade => [trade.mode, trade.side, trade.reason]), [['live', 'BUY', 'crossover'], ['live', 'SELL', 'stop_loss']]);
+  status = (await f.call('/api/bot/status')).body; assert.equal(status.state.position_quantity, null);
+});
+test('bot réel : un ordre au résultat incertain met le bot en pause, aucun renvoi', async t => {
+  const f = fixture(t); Object.assign(f.env, BOT, {BOT_MODE: 'live'}); f.state.failAccept = true;
+  for (const price of SERIES.slice(0, 4)) await f.tick(price);
+  assert.equal(f.acceptCalls(), 1);
+  const status = (await f.call('/api/bot/status')).body;
+  assert.equal(status.paused, true); assert.match(status.pause_reason, /incertain/);
+  for (const price of [13, 5, 20, 30]) await f.tick(price);
+  assert.equal(f.acceptCalls(), 1); assert.equal(f.state.quoteBodies.length, 1);
+});
+test('pause depuis le tableau de bord, plafond d’achats par jour et plafond par ordre', async t => {
+  const f = fixture(t); Object.assign(f.env, BOT, {BOT_MODE: 'live'});
+  await f.session();
+  assert.equal((await f.call('/api/bot/control', {paused: true})).body.paused, true);
+  for (const price of SERIES.slice(0, 4)) await f.tick(price);
+  assert.equal(f.acceptCalls(), 0);
+  assert.match((await f.call('/api/bot/status')).body.state.last_status, /En pause/);
+  assert.equal((await f.call('/api/bot/control', {paused: 'non'})).status, 400);
+  await f.call('/api/bot/control', {paused: false});
+  f.env.BOT_MAX_BUYS_PER_DAY = '1';
+  f.db.sqlite.prepare("INSERT INTO bot_trades (id,mode,asset_id,side,reason,created) VALUES ('x','live',?,'BUY','crossover',?)").run(ASSET, new Date(f.state.now + 15 * 60000).toISOString());
+  for (const price of [5, 4, 20]) await f.tick(price);
+  assert.equal(f.acceptCalls(), 0);
+  assert.match((await f.call('/api/bot/status')).body.state.last_status, /achats déjà faits/);
+  f.env.BOT_MAX_BUYS_PER_DAY = '3'; f.env.BOT_ORDER_AMOUNT = '1000';
+  for (const price of [5, 4, 20]) await f.tick(price);
+  assert.equal(f.acceptCalls(), 0, 'montant du bot supérieur au plafond par ordre');
+});
+test('configuration du bot invalide : refusée sans aucune requête', async t => {
+  const f = fixture(t);
+  for (const settings of [{BOT_MODE: 'yolo'}, {BOT_MODE: 'live', BOT_FAST_PERIOD: '5', BOT_SLOW_PERIOD: '5'}, {BOT_MODE: 'paper', BOT_ORDER_AMOUNT: '1e3'}, {BOT_MODE: 'paper', BOT_ASSET_ID: 'nope'}]) {
+    Object.assign(f.env, {BOT_MODE: 'off', BOT_FAST_PERIOD: '2', BOT_SLOW_PERIOD: '3', BOT_ORDER_AMOUNT: '10', BOT_ASSET_ID: ''}, settings);
+    assert.equal((await f.tick(100)).status, 'error');
+  }
+  assert.equal(f.state.calls.length, 0);
 });

@@ -17,6 +17,11 @@
       "database_id": "29e906f4-f21b-4066-82a1-894b70f2c797"
     }
   ],
+  // Cycle du bot automatique toutes les 15 minutes (production uniquement).
+  // Il ne fait rien tant que BOT_MODE vaut off (valeur par défaut).
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
   // Constructions des branches autres que main (`npx wrangler preview`).
   // Une Preview ne reçoit ni les secrets de production ni la base D1 :
   // elle ne peut pas accéder au compte Bitpanda ni passer d'ordre.
